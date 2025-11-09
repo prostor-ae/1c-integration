@@ -20,6 +20,8 @@ const api = axios.create({
 
 export async function POST(req: Request) {
   try {
+    const body = await req.json();
+    console.log(body);
     // Update handle
     // const MUT = `mutation($input: ProductInput!){
     //   productUpdate(input:$input){
