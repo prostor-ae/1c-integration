@@ -5,35 +5,25 @@ type SendAlertArgs = {
   body: string;
 };
 
+export const ALERT_EMAIL_FROM = "notification@morlavi92.uk";
+export const ALERT_EMAIL_RECIPIENT = "chepiga.lev@gmail.com";
+
 function getResendConfig(): {
   apiKey: string;
   from: string;
   recipients: string[];
 } {
   const apiKey = process.env.RESEND_API_KEY;
-  const from = process.env.ALERT_FROM;
-  const recipientsRaw = process.env.ALERT_RECIPIENTS;
 
   if (!apiKey) {
     throw new Error("RESEND_API_KEY env var is not set");
   }
-  if (!from) {
-    throw new Error("ALERT_FROM env var is not set");
-  }
-  if (!recipientsRaw) {
-    throw new Error("ALERT_RECIPIENTS env var is not set");
-  }
 
-  const recipients = recipientsRaw
-    .split(",")
-    .map((r) => r.trim())
-    .filter((r) => r.length > 0);
-
-  if (recipients.length === 0) {
-    throw new Error("ALERT_RECIPIENTS env var contains no recipients");
-  }
-
-  return { apiKey, from, recipients };
+  return {
+    apiKey,
+    from: ALERT_EMAIL_FROM,
+    recipients: [ALERT_EMAIL_RECIPIENT],
+  };
 }
 
 export async function sendAlert({ subject, body }: SendAlertArgs): Promise<void> {

@@ -35,9 +35,9 @@ Rotation is **manual**: rotate the value in the Vercel UI for the affected envir
 | `ONE_C_URL_1` | Vercel project envs (per env) | Update in Vercel UI, redeploy |
 | `ONE_C_URL_2` | Vercel project envs (per env) | Update in Vercel UI, redeploy |
 | `RESEND_API_KEY` | Vercel project envs (per env) | Rotate in Resend dashboard, update in Vercel UI, redeploy |
-| `ALERT_FROM` | Vercel project envs (per env) | Update in Vercel UI, redeploy |
-| `ALERT_RECIPIENTS` | Vercel project envs (per env) | Update in Vercel UI (comma-separated), redeploy |
 | `API_VERSION` (optional) | Vercel project envs (per env) | Update in Vercel UI, redeploy. Defaults to `2024-07` if unset. |
+
+Alert emails are hardcoded in `src/app/lib/alerts.ts` to send from `notification@morlavi92.uk` to `chepiga.lev@gmail.com`; no `ALERT_FROM` or `ALERT_RECIPIENTS` environment variables are required.
 
 ## Pre-flight
 
@@ -89,7 +89,7 @@ When multiple modes are combined, they execute sequentially in canonical order `
 
 The daily cron runs at `0 22 * * *` UTC (= 02:00 UAE) and is restricted to `stock + prices`. Costs is intentionally manual-only — see the deprecation note below for the migration from the legacy endpoint.
 
-The 20% safety floor only applies to `stock` mode: if more than 20% of currently-ACTIVE products would flip to DRAFT, the bulk op is skipped, an alert email is sent to every `ALERT_RECIPIENTS` address, and the run returns `results.stock.skipped` with the percentage. Other modes have no percentage floor — only an empty-payload check per 1C endpoint.
+The 20% safety floor only applies to `stock` mode: if more than 20% of currently-ACTIVE products would flip to DRAFT, the bulk op is skipped, an alert email is sent from `notification@morlavi92.uk` to `chepiga.lev@gmail.com`, and the run returns `results.stock.skipped` with the percentage. Other modes have no percentage floor — only an empty-payload check per 1C endpoint.
 
 If a previous bulk op is still RUNNING/CREATED when a mode starts, that mode is skipped (Shopify allows only one bulk op per app at a time) and a conflict alert is emailed.
 
