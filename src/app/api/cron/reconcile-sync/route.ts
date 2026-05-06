@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { acceptSyncRun, isSyncConfigError, kickOffSyncRun } from "@/app/lib/sync";
+import { isSyncConfigError, reconcileSyncRuns } from "@/app/lib/sync";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,17 +17,12 @@ export async function GET(request: Request) {
     return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
   }
 
-  const startedAt = Date.now();
   try {
-    const accepted = await acceptSyncRun({ modes: ["stock", "prices"], source: "cron" });
-    if (accepted.accepted) kickOffSyncRun(accepted.runId);
-    const durationMs = Date.now() - startedAt;
-    console.log(JSON.stringify({ event: "cron_sync_accepted", durationMs, accepted }));
-    return NextResponse.json({ ok: true, ...accepted }, { status: 202 });
+    const result = await reconcileSyncRuns();
+    return NextResponse.json({ ok: true, ...result });
   } catch (error: any) {
-    const durationMs = Date.now() - startedAt;
     const message = error?.message ?? String(error);
-    console.error(JSON.stringify({ event: "cron_sync_accept_failed", durationMs, error: message }));
+    console.error(JSON.stringify({ event: "sync_reconcile_failed", error: message }));
     if (isSyncConfigError(error)) {
       return NextResponse.json(
         { ok: false, error: "redis_required", message },

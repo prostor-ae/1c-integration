@@ -1,36 +1,145 @@
-This is a [Next.js](https://nextjs.org/) project bootstrapped with [`create-next-app`](https://github.com/vercel/next.js/tree/canary/packages/create-next-app).
+# 1c-integration
 
-## Getting Started
+Next.js service that syncs the Prostor 1C catalog into Shopify. Two surfaces drive the same shared `runSync({ modes })` core:
 
-First, run the development server:
+- **Daily cron** at `/api/cron/daily-sync` — runs `stock + prices` only.
+- **Manual trigger** at `/api/sync/trigger` — accepts any combination of `stock`, `prices`, `costs`.
+
+`costs` is intentionally manual-only and excluded from the cron.
+
+## Getting started
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Secrets
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+All secrets live in **Vercel project environment variables** (per environment: production, preview, development). `.env.local` is git-ignored (`.gitignore` line for `.env*.local`) and verified on 2026-05-05 not to appear in any historical commit (`git log --all --full-history -- .env.local` returns nothing). Secrets must never be committed.
 
-This project uses [`next/font`](https://nextjs.org/docs/basic-features/font-optimization) to automatically optimize and load Inter, a custom Google Font.
+Rotation is **manual**: rotate the value in the Vercel UI for the affected environment, then trigger a redeploy so the new value reaches the running functions.
 
-## Learn More
+| Env var | Where it lives | Rotation procedure |
+|---|---|---|
+| `SHOPIFY_STORE_DOMAIN` | Vercel project envs (per env) | Rotate in Vercel UI, redeploy |
+| `SHOPIFY_ADMIN_TOKEN` | Vercel project envs (per env) | Rotate in Shopify admin, update in Vercel UI, redeploy |
+| `SHOPIFY_STORE_DOMAIN_TEST` | Vercel project envs (per env) | Rotate in Vercel UI, redeploy |
+| `SHOPIFY_ADMIN_TOKEN_TEST` | Vercel project envs (per env) | Rotate in Shopify admin (test shop), update in Vercel UI, redeploy |
+| `INTERNAL_API_KEY` | Vercel project envs (per env) | Rotate in Vercel UI, redeploy, update any caller |
+| `ONE_C_USERNAME` | Vercel project envs (per env) | Rotate in 1C, update in Vercel UI, redeploy |
+| `ONE_C_PASSWORD` | Vercel project envs (per env) | Rotate in 1C, update in Vercel UI, redeploy |
+| `ONE_C_PRICES_URL` | Vercel project envs (per env) | Update in Vercel UI, redeploy |
+| `ONE_C_DISCOUNTS_URL` | Vercel project envs (per env) | Update in Vercel UI, redeploy |
+| `ONE_C_STOCK_URL` | Vercel project envs (per env) | Update in Vercel UI, redeploy |
+| `ONE_C_URL_1` | Vercel project envs (per env) | Update in Vercel UI, redeploy |
+| `ONE_C_URL_2` | Vercel project envs (per env) | Update in Vercel UI, redeploy |
+| `RESEND_API_KEY` | Vercel project envs (per env) | Rotate in Resend dashboard, update in Vercel UI, redeploy |
+| `ALERT_FROM` | Vercel project envs (per env) | Update in Vercel UI, redeploy |
+| `ALERT_RECIPIENTS` | Vercel project envs (per env) | Update in Vercel UI (comma-separated), redeploy |
+| `API_VERSION` (optional) | Vercel project envs (per env) | Update in Vercel UI, redeploy. Defaults to `2024-07` if unset. |
 
-To learn more about Next.js, take a look at the following resources:
+## Pre-flight
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Before the **first prod sync**, audit the Shopify catalog for blank or duplicate barcodes. Barcode is the join key between 1C and Shopify, so duplicates cause silent mis-updates.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js/) - your feedback and contributions are welcome!
+```bash
+npm install
+npx tsx scripts/audit-barcodes.ts
+```
 
-## Deploy on Vercel
+The script prints two sections to stdout:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```
+Variants with blank barcode: <count>
+  <productHandle> | <variantId>
+  ...
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/deployment) for more details.
+Duplicate barcodes: <count>
+  <barcode> -> [<variantId1>, <variantId2>, ...]
+  ...
+```
+
+It always exits 0 and never mutates anything. Resolve all duplicates and blanks **before** triggering any sync.
+
+`tsx` is bundled in `devDependencies`, so `npx tsx ...` resolves from the local lockfile after `npm install`.
+
+## Operations
+
+The manual trigger endpoint accepts any combination of modes:
+
+```bash
+# Costs only (manual-only — not part of the cron)
+curl -H "x-api-key: $INTERNAL_API_KEY" -X POST \
+  -d '{"modes":["costs"]}' \
+  "$BASE/api/sync/trigger"
+
+# Stock + prices (same as the daily cron)
+curl -H "x-api-key: $INTERNAL_API_KEY" -X POST \
+  -d '{"modes":["stock","prices"]}' \
+  "$BASE/api/sync/trigger"
+
+# All three
+curl -H "x-api-key: $INTERNAL_API_KEY" -X POST \
+  -d '{"modes":["stock","prices","costs"]}' \
+  "$BASE/api/sync/trigger"
+```
+
+When multiple modes are combined, they execute sequentially in canonical order `costs → prices → stock` regardless of the input order.
+
+The daily cron runs at `0 22 * * *` UTC (= 02:00 UAE) and is restricted to `stock + prices`. Costs is intentionally manual-only — see the deprecation note below for the migration from the legacy endpoint.
+
+The 20% safety floor only applies to `stock` mode: if more than 20% of currently-ACTIVE products would flip to DRAFT, the bulk op is skipped, an alert email is sent to every `ALERT_RECIPIENTS` address, and the run returns `results.stock.skipped` with the percentage. Other modes have no percentage floor — only an empty-payload check per 1C endpoint.
+
+If a previous bulk op is still RUNNING/CREATED when a mode starts, that mode is skipped (Shopify allows only one bulk op per app at a time) and a conflict alert is emailed.
+
+## Deprecation: `/api/update-costs`
+
+The legacy `POST /api/update-costs` endpoint has been **removed** in this hardening pass. Its logic now lives in `runCostsMode` inside `src/app/lib/sync.ts` and is reachable through the unified manual trigger.
+
+**Migration:** any caller (CI job, ad-hoc script, internal tool) that previously called `POST /api/update-costs` must now call:
+
+```bash
+curl -H "x-api-key: $INTERNAL_API_KEY" -X POST \
+  -d '{"modes":["costs"]}' \
+  "$BASE/api/sync/trigger"
+```
+
+The replacement is strictly equivalent: same auth header (`x-api-key: $INTERNAL_API_KEY`), same effect (Alqithara + Local cost merge, then bulk inventoryItem cost update), and the response now exposes a per-mode shape:
+
+```json
+{
+  "ok": true,
+  "results": {
+    "costs": { "proposed": 42, "applied": 42 }
+  }
+}
+```
+
+Skip outcomes (prior bulk op active, empty 1C payload) appear as `results.costs.skipped: "<reason>"` instead of throwing.
+
+## Vercel-safe async sync architecture
+
+The sync endpoints are quick-ack: they accept work, persist a short-lived run record, and return `202` with `runId`/status metadata instead of waiting for Shopify bulk operations to finish.
+
+Required production infrastructure:
+
+- **Upstash Redis via Vercel Marketplace**. This project expects `REDIS_URL` for durable orchestration state. If `REDIS_URL` is missing in production, sync acceptance fails closed with `503 { ok: false, error: "redis_required" }` and never falls back to long synchronous execution.
+- `SHOPIFY_API_VERSION=2026-04`.
+- `SHOPIFY_WEBHOOK_SECRET` (or `SHOPIFY_API_SECRET_KEY` / `SHOPIFY_CLIENT_SECRET`) for Shopify HMAC verification.
+- Register Shopify `bulk_operations/finish` webhook to `/api/webhooks/shopify/bulk-operations`.
+
+Operational model:
+
+- `/api/cron/daily-sync` schedules the daily `prices -> stock` run and returns quickly.
+- `/api/sync/trigger` schedules manual modes in canonical order `costs -> prices -> stock` and returns quickly.
+- `/api/webhooks/shopify/bulk-operations` records Shopify bulk completion and advances the next mode idempotently.
+- `/api/cron/reconcile-sync` repairs missed webhook transitions and alerts for stale operations.
+- There is no dashboard/run history requirement. A failure email/log is the operator signal; otherwise the run may be considered successful enough.
+
+Cron recovery SLA:
+
+- Hobby cron recovery is daily plus scheduler jitter.
+- If operations require sub-hour recovery on Hobby, or if two consecutive webhook/reconciler recoveries are delayed by more than 24h, the next architecture step is mandatory queue/workflow orchestration.
+
+The legacy synchronous `runSync()` remains for local/manual debugging only. API route handlers must not call it or wait on `pollBulkOperation()`.

@@ -1,17 +1,25 @@
 import { ApiError } from "next/dist/server/api-utils";
+import { sendBulkOpTimeoutAlert } from "./alerts";
+import { SHOPIFY_API_VERSION } from "./config";
 
-const SHOPIFY_STORE_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN;
-const SHOPIFY_ADMIN_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN as string;
+const API_VERSION = SHOPIFY_API_VERSION;
 
-const SHOPIFY_STORE_DOMAIN_TEST = process.env.SHOPIFY_STORE_DOMAIN_TEST;
-const SHOPIFY_ADMIN_TOKEN_TEST = process.env.SHOPIFY_ADMIN_TOKEN_TEST as string;
+function getShopifyEnv(isTest: boolean): { domain: string; token: string } {
+  const domain = isTest
+    ? process.env.SHOPIFY_STORE_DOMAIN_TEST
+    : process.env.SHOPIFY_STORE_DOMAIN;
+  const token = isTest
+    ? process.env.SHOPIFY_ADMIN_TOKEN_TEST
+    : process.env.SHOPIFY_ADMIN_TOKEN;
 
-const API_VERSION = process.env.API_VERSION || "2024-07";
-
-if (!SHOPIFY_STORE_DOMAIN || !SHOPIFY_ADMIN_TOKEN) {
-  throw new Error(
-    "Missing SHOPIFY_STORE_DOMAIN or SHOPIFY_ADMIN_TOKEN environment variables."
-  );
+  if (!domain || !token) {
+    throw new Error(
+      `Missing ${
+        isTest ? "SHOPIFY_STORE_DOMAIN_TEST/SHOPIFY_ADMIN_TOKEN_TEST" : "SHOPIFY_STORE_DOMAIN/SHOPIFY_ADMIN_TOKEN"
+      } environment variables.`
+    );
+  }
+  return { domain, token };
 }
 
 async function shopifyFetch(
@@ -19,17 +27,14 @@ async function shopifyFetch(
   variables: any,
   isTest: boolean = false
 ) {
-  const SHOPIFY_GRAPHQL_URL = `https://${
-    isTest ? SHOPIFY_STORE_DOMAIN_TEST : SHOPIFY_STORE_DOMAIN
-  }/admin/api/${API_VERSION}/graphql.json`;
+  const { domain, token } = getShopifyEnv(isTest);
+  const SHOPIFY_GRAPHQL_URL = `https://${domain}/admin/api/${API_VERSION}/graphql.json`;
 
   const res = await fetch(SHOPIFY_GRAPHQL_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "X-Shopify-Access-Token": isTest
-        ? SHOPIFY_ADMIN_TOKEN_TEST
-        : SHOPIFY_ADMIN_TOKEN,
+      "X-Shopify-Access-Token": token,
     },
     body: JSON.stringify({ query, variables }),
   });
@@ -44,6 +49,7 @@ async function shopifyFetch(
 
   const json = await res.json();
   if (json.errors && json.errors.length) {
+    // Inspect for THROTTLED so callShopify can decide to retry vs re-throw.
     throw new ApiError(
       400,
       "Shopify GraphQL Error: " + JSON.stringify(json.errors)
@@ -52,14 +58,41 @@ async function shopifyFetch(
   return json;
 }
 
+const MAX_ATTEMPTS = 5;
+
+function isThrottledGraphQLError(error: any): boolean {
+  // Detect THROTTLED extension code by string-matching the serialized errors payload.
+  const msg = error?.message ?? "";
+  return (
+    typeof msg === "string" &&
+    msg.includes("Shopify GraphQL Error") &&
+    msg.includes("THROTTLED")
+  );
+}
+
+function isRetryableError(error: any): boolean {
+  // Network error from fetch shows up as a TypeError (no statusCode).
+  if (error instanceof TypeError) return true;
+  if (error instanceof ApiError) {
+    const code = error.statusCode;
+    if (code === 429) return true;
+    if (code >= 500 && code <= 599) return true;
+    if (isThrottledGraphQLError(error)) return true;
+    return false;
+  }
+  // Unknown error shape — be conservative, don't retry.
+  return false;
+}
+
 export async function callShopify(
   query: string,
   variables = {},
   isTest: boolean = false
 ) {
-  while (true) {
+  let lastError: any = null;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      const data = await shopifyFetch(query, variables);
+      const data = await shopifyFetch(query, variables, isTest);
 
       if (!data.extensions || !data.extensions.cost) {
         return data;
@@ -78,21 +111,190 @@ export async function callShopify(
 
       return data;
     } catch (error: any) {
-      console.error("Error in callShopify:", error.message);
-      if (error instanceof ApiError && error.statusCode === 429) {
-        console.log("Rate limit error detected, retrying in 5s...");
-        await new Promise((r) => setTimeout(r, 5000));
-        continue;
+      lastError = error;
+      if (!isRetryableError(error)) {
+        // Permanent error — re-throw immediately, no sleep.
+        throw error;
       }
-      // For other errors, re-throw after a delay
-      await new Promise((r) => setTimeout(r, 5000));
-      throw error;
+      console.error(
+        `callShopify attempt ${attempt}/${MAX_ATTEMPTS} failed (retryable): ${error.message}`
+      );
+      if (attempt < MAX_ATTEMPTS) {
+        const backoffMs = 1000 * attempt;
+        await new Promise((r) => setTimeout(r, backoffMs));
+      }
     }
+  }
+  throw new Error(
+    `Shopify retries exhausted after ${MAX_ATTEMPTS} attempts: ${
+      lastError?.message ?? "unknown error"
+    }`
+  );
+}
+
+export async function assertNoActiveBulkOperation(
+  mode: "stock" | "prices" | "costs"
+): Promise<void> {
+  const query = `
+    query {
+      currentBulkOperation {
+        id
+        status
+      }
+    }
+  `;
+  const data = await callShopify(query, {});
+  const op = data?.data?.currentBulkOperation;
+  if (!op) return;
+  const status = op.status;
+  if (status === "RUNNING" || status === "CREATED") {
+    throw new Error(
+      JSON.stringify({
+        error: "prior_bulk_op_active",
+        mode,
+        op_id: op.id,
+        status,
+      })
+    );
   }
 }
 
+export async function pollBulkOperation(
+  opId: string,
+  mode: "stock" | "prices" | "costs"
+): Promise<{ status: string; partialDataUrl: string | null }> {
+  const POLL_INTERVAL_MS = 5000;
+  // 50 attempts × 5s = 250s, leaving 50s headroom under route maxDuration=300s
+  // for surrounding work (snapshot fetch, JSONL upload, second mode in a combined run).
+  const MAX_POLL_ATTEMPTS = 50;
+  const startedAt = Date.now();
+
+  const pollQuery = `
+    query {
+      currentBulkOperation {
+        id
+        status
+        partialDataUrl
+        errorCode
+      }
+    }
+  `;
+
+  for (let attempt = 1; attempt <= MAX_POLL_ATTEMPTS; attempt++) {
+    // Query first, sleep at end of iteration — terminal status is detected
+    // without an extra POLL_INTERVAL_MS tax when the op has already finished.
+    const data = await callShopify(pollQuery, {});
+    const op = data?.data?.currentBulkOperation;
+    const status: string = op?.status ?? "UNKNOWN";
+    const partialDataUrl: string | null = op?.partialDataUrl ?? null;
+    const errorCode: string | null = op?.errorCode ?? null;
+
+    if (status === "COMPLETED") {
+      const durationMs = Date.now() - startedAt;
+      console.log(
+        JSON.stringify({
+          event: "bulk_op_completed",
+          id: opId,
+          mode,
+          durationMs,
+          partialDataUrl,
+        })
+      );
+      if (partialDataUrl) {
+        try {
+          const head = await fetch(partialDataUrl, { method: "HEAD" });
+          const lengthHeader = head.headers.get("content-length");
+          const contentLength = lengthHeader ? parseInt(lengthHeader, 10) : null;
+          if (contentLength !== null && contentLength > 10 * 1024 * 1024) {
+            console.warn(
+              "partialDataUrl response too large to count, skipping"
+            );
+          } else {
+            const resp = await fetch(partialDataUrl);
+            const text = await resp.text();
+            const lineCount = text.split("\n").filter((l) => l.length > 0).length;
+            console.log(
+              JSON.stringify({
+                event: "bulk_op_partial_errors",
+                mode,
+                lineCount,
+              })
+            );
+          }
+        } catch (err: any) {
+          console.warn(
+            `Failed to fetch partialDataUrl for mode=${mode}: ${err?.message ?? err}`
+          );
+        }
+      }
+      return { status, partialDataUrl };
+    }
+
+    if (status === "FAILED" || status === "CANCELED" || status === "EXPIRED") {
+      throw new Error(
+        `Bulk op ${opId} ended with ${status}, code=${errorCode ?? "null"}`
+      );
+    }
+
+    if (attempt < MAX_POLL_ATTEMPTS) {
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    }
+  }
+
+  console.error(
+    JSON.stringify({ event: "bulk_op_timeout", mode, opId })
+  );
+  await sendBulkOpTimeoutAlert({ mode, opId });
+  throw new Error(
+    `Bulk op ${opId} (${mode}) did not reach a terminal status within polling budget`
+  );
+}
+
+
+export type ShopifyBulkOperationStatus = {
+  id: string;
+  status: string;
+  errorCode: string | null;
+  type: "MUTATION" | "QUERY" | string | null;
+  url: string | null;
+  partialDataUrl: string | null;
+};
+
+export async function getBulkOperationById(
+  id: string
+): Promise<ShopifyBulkOperationStatus | null> {
+  const query = `
+    query bulkOperationStatus($id: ID!) {
+      node(id: $id) {
+        ... on BulkOperation {
+          id
+          status
+          errorCode
+          type
+          url
+          partialDataUrl
+        }
+      }
+    }
+  `;
+  const data = await callShopify(query, { id });
+  const op = data?.data?.node;
+  if (!op) return null;
+  return {
+    id: op.id,
+    status: op.status,
+    errorCode: op.errorCode ?? null,
+    type: op.type ?? null,
+    url: op.url ?? null,
+    partialDataUrl: op.partialDataUrl ?? null,
+  };
+}
+
 export async function fetchAllShopifyVariants() {
-  const variants = new Map<string, { inventoryItemId: string; cost: string }>();
+  const variants = new Map<
+    string,
+    { inventoryItemId: string; cost: string | null }
+  >();
   let cursor = null;
   let hasNextPage = true;
 
@@ -127,7 +329,7 @@ export async function fetchAllShopifyVariants() {
       if (edge.node.barcode && edge.node.inventoryItem) {
         variants.set(edge.node.barcode, {
           inventoryItemId: edge.node.inventoryItem.id,
-          cost: edge.node.inventoryItem.unitCost?.amount,
+          cost: edge.node.inventoryItem.unitCost?.amount ?? null,
         });
       }
     });
@@ -262,6 +464,7 @@ export async function runCostUpdateBulkMutation(
 
 export type ShopifyProductInfo = {
   id: string;
+  handle: string;
   status: "ACTIVE" | "DRAFT" | "ARCHIVED";
   variants: {
     id: string;
@@ -291,6 +494,7 @@ export async function fetchAllShopifyProductsAndVariants(): Promise<
           edges {
             node {
               id
+              handle
               status
               variants(first: 100) {
                 edges {
@@ -313,6 +517,7 @@ export async function fetchAllShopifyProductsAndVariants(): Promise<
     data.data.products.edges.forEach((edge: any) => {
       products.set(edge.node.id, {
         id: edge.node.id,
+        handle: edge.node.handle,
         status: edge.node.status,
         variants: edge.node.variants.edges.map((vEdge: any) => vEdge.node),
       });
