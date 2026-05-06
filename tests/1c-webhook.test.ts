@@ -1,0 +1,191 @@
+import assert from "node:assert/strict";
+import { beforeEach, test } from "node:test";
+import { POST as oneCWebhookPost } from "../src/app/api/webhooks/1c/route";
+import {
+  parseOneCWebhookItems,
+  processOneCWebhookItems,
+} from "../src/app/lib/1c-webhook";
+import type { ShopifyProductInfo } from "../src/app/lib/shopify-client";
+
+beforeEach(() => {
+  delete process.env.ONE_C_WEBHOOK_KEY;
+  process.env.NODE_ENV = "test";
+});
+
+function product(
+  id: string,
+  status: ShopifyProductInfo["status"],
+  barcode: string,
+): ShopifyProductInfo {
+  return {
+    id,
+    handle: id.toLowerCase(),
+    status,
+    variants: [
+      {
+        id: `${id}-variant`,
+        barcode,
+        price: "1.00",
+        compareAtPrice: null,
+      },
+    ],
+  };
+}
+
+function webhookRequest(headers: HeadersInit, body: string) {
+  return new Request("https://example.test/api/webhooks/1c", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...headers },
+    body,
+  });
+}
+
+test("1C webhook rejects requests when webhook key is not configured", async () => {
+  const response = await oneCWebhookPost(
+    webhookRequest(
+      { "x-api-key": "secret" },
+      JSON.stringify({ Items: { "481": "Yes" } }),
+    ),
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 500);
+  assert.equal(body.ok, false);
+  assert.equal(body.error, "one_c_webhook_key_not_configured");
+});
+
+test("1C webhook rejects missing or wrong x-api-key", async () => {
+  process.env.ONE_C_WEBHOOK_KEY = "secret";
+
+  const missing = await oneCWebhookPost(
+    webhookRequest({}, JSON.stringify({ Items: { "481": "Yes" } })),
+  );
+  assert.equal(missing.status, 401);
+
+  const wrong = await oneCWebhookPost(
+    webhookRequest(
+      { "x-api-key": "wrong" },
+      JSON.stringify({ Items: { "481": "Yes" } }),
+    ),
+  );
+  assert.equal(wrong.status, 401);
+});
+
+test("1C webhook rejects invalid JSON before Shopify processing", async () => {
+  process.env.ONE_C_WEBHOOK_KEY = "secret";
+
+  const response = await oneCWebhookPost(
+    webhookRequest({ "x-api-key": "secret" }, "not-json"),
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 400);
+  assert.equal(body.error, "invalid_json");
+});
+
+test("parseOneCWebhookItems requires a non-empty Items object with exact Yes/No values", () => {
+  assert.throws(
+    () => parseOneCWebhookItems({}),
+    /items_must_be_non_empty_object/,
+  );
+  assert.throws(
+    () => parseOneCWebhookItems({ Items: {} }),
+    /items_must_be_non_empty_object/,
+  );
+  assert.throws(
+    () => parseOneCWebhookItems({ Items: { "481": "yes" } }),
+    /item_values_must_be_yes_or_no/,
+  );
+  assert.throws(
+    () => parseOneCWebhookItems({ Items: { "": "Yes" } }),
+    /barcode_must_be_non_empty/,
+  );
+
+  assert.deepEqual(
+    parseOneCWebhookItems({ Items: { "481": "Yes", "482": "No" } }),
+    {
+      "481": "Yes",
+      "482": "No",
+    },
+  );
+});
+
+test("processOneCWebhookItems maps barcode Yes/No to direct product ACTIVE/DRAFT updates", async () => {
+  const products = new Map<string, ShopifyProductInfo>([
+    [
+      "gid://shopify/Product/1",
+      product("gid://shopify/Product/1", "DRAFT", "481"),
+    ],
+    [
+      "gid://shopify/Product/2",
+      product("gid://shopify/Product/2", "ACTIVE", "482"),
+    ],
+    [
+      "gid://shopify/Product/3",
+      product("gid://shopify/Product/3", "DRAFT", "483"),
+    ],
+    [
+      "gid://shopify/Product/4",
+      product("gid://shopify/Product/4", "ACTIVE", "absent"),
+    ],
+  ]);
+  const capturedUpdates: Array<{
+    productId: string;
+    status: "ACTIVE" | "DRAFT";
+  }> = [];
+
+  const result = await processOneCWebhookItems(
+    { "481": "Yes", "482": "No", "483": "No", unknown: "Yes" },
+    {
+      fetchProducts: async () => products,
+      updateProductStatus: async (productId, status) => {
+        capturedUpdates.push({ productId, status });
+        return { id: productId, status };
+      },
+    },
+  );
+
+  assert.deepEqual(capturedUpdates, [
+    { productId: "gid://shopify/Product/1", status: "ACTIVE" },
+    { productId: "gid://shopify/Product/2", status: "DRAFT" },
+  ]);
+  assert.equal(result.received, 4);
+  assert.equal(result.matched, 3);
+  assert.equal(result.unknown, 1);
+  assert.equal(result.unchanged, 1);
+  assert.equal(result.proposed, 2);
+  assert.deepEqual(result.unknownBarcodes, ["unknown"]);
+  assert.equal(result.applied, 2);
+  assert.deepEqual(result.updatedProducts, [
+    { id: "gid://shopify/Product/1", status: "ACTIVE" },
+    { id: "gid://shopify/Product/2", status: "DRAFT" },
+  ]);
+});
+
+test("processOneCWebhookItems does not run a Shopify mutation when all matches are no-ops or unknown", async () => {
+  const products = new Map<string, ShopifyProductInfo>([
+    [
+      "gid://shopify/Product/1",
+      product("gid://shopify/Product/1", "ACTIVE", "481"),
+    ],
+  ]);
+  let mutationCalled = false;
+
+  const result = await processOneCWebhookItems(
+    { "481": "Yes", unknown: "No" },
+    {
+      fetchProducts: async () => products,
+      updateProductStatus: async () => {
+        mutationCalled = true;
+        return { id: "should-not-run", status: "ACTIVE" };
+      },
+    },
+  );
+
+  assert.equal(mutationCalled, false);
+  assert.equal(result.proposed, 0);
+  assert.equal(result.unchanged, 1);
+  assert.equal(result.unknown, 1);
+  assert.equal(result.applied, 0);
+  assert.deepEqual(result.updatedProducts, []);
+});

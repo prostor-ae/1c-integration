@@ -5,6 +5,7 @@ import { SHOPIFY_API_VERSION } from "./config";
 const API_VERSION = SHOPIFY_API_VERSION;
 
 function getShopifyEnv(isTest: boolean): { domain: string; token: string } {
+  isTest = true;
   const domain = isTest
     ? process.env.SHOPIFY_STORE_DOMAIN_TEST
     : process.env.SHOPIFY_STORE_DOMAIN;
@@ -15,8 +16,10 @@ function getShopifyEnv(isTest: boolean): { domain: string; token: string } {
   if (!domain || !token) {
     throw new Error(
       `Missing ${
-        isTest ? "SHOPIFY_STORE_DOMAIN_TEST/SHOPIFY_ADMIN_TOKEN_TEST" : "SHOPIFY_STORE_DOMAIN/SHOPIFY_ADMIN_TOKEN"
-      } environment variables.`
+        isTest
+          ? "SHOPIFY_STORE_DOMAIN_TEST/SHOPIFY_ADMIN_TOKEN_TEST"
+          : "SHOPIFY_STORE_DOMAIN/SHOPIFY_ADMIN_TOKEN"
+      } environment variables.`,
     );
   }
   return { domain, token };
@@ -25,7 +28,7 @@ function getShopifyEnv(isTest: boolean): { domain: string; token: string } {
 async function shopifyFetch(
   query: string,
   variables: any,
-  isTest: boolean = false
+  isTest: boolean = false,
 ) {
   const { domain, token } = getShopifyEnv(isTest);
   const SHOPIFY_GRAPHQL_URL = `https://${domain}/admin/api/${API_VERSION}/graphql.json`;
@@ -43,7 +46,7 @@ async function shopifyFetch(
     const text = await res.text().catch(() => "");
     throw new ApiError(
       res.status,
-      `Shopify API Error: ${res.statusText} - ${text}`
+      `Shopify API Error: ${res.statusText} - ${text}`,
     );
   }
 
@@ -52,7 +55,7 @@ async function shopifyFetch(
     // Inspect for THROTTLED so callShopify can decide to retry vs re-throw.
     throw new ApiError(
       400,
-      "Shopify GraphQL Error: " + JSON.stringify(json.errors)
+      "Shopify GraphQL Error: " + JSON.stringify(json.errors),
     );
   }
   return json;
@@ -87,7 +90,7 @@ function isRetryableError(error: any): boolean {
 export async function callShopify(
   query: string,
   variables = {},
-  isTest: boolean = false
+  isTest: boolean = false,
 ) {
   let lastError: any = null;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -117,7 +120,7 @@ export async function callShopify(
         throw error;
       }
       console.error(
-        `callShopify attempt ${attempt}/${MAX_ATTEMPTS} failed (retryable): ${error.message}`
+        `callShopify attempt ${attempt}/${MAX_ATTEMPTS} failed (retryable): ${error.message}`,
       );
       if (attempt < MAX_ATTEMPTS) {
         const backoffMs = 1000 * attempt;
@@ -128,12 +131,12 @@ export async function callShopify(
   throw new Error(
     `Shopify retries exhausted after ${MAX_ATTEMPTS} attempts: ${
       lastError?.message ?? "unknown error"
-    }`
+    }`,
   );
 }
 
 export async function assertNoActiveBulkOperation(
-  mode: "stock" | "prices" | "costs"
+  mode: "stock" | "prices" | "costs",
 ): Promise<void> {
   const query = `
     query {
@@ -154,14 +157,14 @@ export async function assertNoActiveBulkOperation(
         mode,
         op_id: op.id,
         status,
-      })
+      }),
     );
   }
 }
 
 export async function pollBulkOperation(
   opId: string,
-  mode: "stock" | "prices" | "costs"
+  mode: "stock" | "prices" | "costs",
 ): Promise<{ status: string; partialDataUrl: string | null }> {
   const POLL_INTERVAL_MS = 5000;
   // 50 attempts × 5s = 250s, leaving 50s headroom under route maxDuration=300s
@@ -198,32 +201,36 @@ export async function pollBulkOperation(
           mode,
           durationMs,
           partialDataUrl,
-        })
+        }),
       );
       if (partialDataUrl) {
         try {
           const head = await fetch(partialDataUrl, { method: "HEAD" });
           const lengthHeader = head.headers.get("content-length");
-          const contentLength = lengthHeader ? parseInt(lengthHeader, 10) : null;
+          const contentLength = lengthHeader
+            ? parseInt(lengthHeader, 10)
+            : null;
           if (contentLength !== null && contentLength > 10 * 1024 * 1024) {
             console.warn(
-              "partialDataUrl response too large to count, skipping"
+              "partialDataUrl response too large to count, skipping",
             );
           } else {
             const resp = await fetch(partialDataUrl);
             const text = await resp.text();
-            const lineCount = text.split("\n").filter((l) => l.length > 0).length;
+            const lineCount = text
+              .split("\n")
+              .filter((l) => l.length > 0).length;
             console.log(
               JSON.stringify({
                 event: "bulk_op_partial_errors",
                 mode,
                 lineCount,
-              })
+              }),
             );
           }
         } catch (err: any) {
           console.warn(
-            `Failed to fetch partialDataUrl for mode=${mode}: ${err?.message ?? err}`
+            `Failed to fetch partialDataUrl for mode=${mode}: ${err?.message ?? err}`,
           );
         }
       }
@@ -232,7 +239,7 @@ export async function pollBulkOperation(
 
     if (status === "FAILED" || status === "CANCELED" || status === "EXPIRED") {
       throw new Error(
-        `Bulk op ${opId} ended with ${status}, code=${errorCode ?? "null"}`
+        `Bulk op ${opId} ended with ${status}, code=${errorCode ?? "null"}`,
       );
     }
 
@@ -241,15 +248,12 @@ export async function pollBulkOperation(
     }
   }
 
-  console.error(
-    JSON.stringify({ event: "bulk_op_timeout", mode, opId })
-  );
+  console.error(JSON.stringify({ event: "bulk_op_timeout", mode, opId }));
   await sendBulkOpTimeoutAlert({ mode, opId });
   throw new Error(
-    `Bulk op ${opId} (${mode}) did not reach a terminal status within polling budget`
+    `Bulk op ${opId} (${mode}) did not reach a terminal status within polling budget`,
   );
 }
-
 
 export type ShopifyBulkOperationStatus = {
   id: string;
@@ -261,7 +265,7 @@ export type ShopifyBulkOperationStatus = {
 };
 
 export async function getBulkOperationById(
-  id: string
+  id: string,
 ): Promise<ShopifyBulkOperationStatus | null> {
   const query = `
     query bulkOperationStatus($id: ID!) {
@@ -344,7 +348,7 @@ export async function fetchAllShopifyVariants() {
 }
 
 export async function runCostUpdateBulkMutation(
-  updates: { inventoryItemId: string; cost: number }[]
+  updates: { inventoryItemId: string; cost: number }[],
 ) {
   console.log(`Preparing bulk mutation for ${updates.length} cost updates.`);
   // 1. Create staged upload
@@ -373,7 +377,7 @@ export async function runCostUpdateBulkMutation(
           id: u.inventoryItemId,
           cost: u.cost.toString(),
         },
-      })
+      }),
     )
     .join("\n");
 
@@ -390,7 +394,7 @@ export async function runCostUpdateBulkMutation(
 
   const stagedUploadsResult = await callShopify(
     stagedUploadsQuery,
-    stagedUploadsInput
+    stagedUploadsInput,
   );
   const target = stagedUploadsResult.data.stagedUploadsCreate.stagedTargets[0];
   const { url, parameters } = target;
@@ -453,8 +457,8 @@ export async function runCostUpdateBulkMutation(
   if (bulkOperationResult.data.bulkOperationRunMutation.userErrors.length > 0) {
     throw new Error(
       `Failed to start bulk operation: ${JSON.stringify(
-        bulkOperationResult.data.bulkOperationRunMutation.userErrors
-      )}`
+        bulkOperationResult.data.bulkOperationRunMutation.userErrors,
+      )}`,
     );
   }
 
@@ -537,7 +541,7 @@ export async function runPriceUpdateBulkMutation(
     variantId: string;
     price: string;
     compareAtPrice: string | null;
-  }[]
+  }[],
 ) {
   console.log(`Preparing bulk mutation for ${updates.length} price updates.`);
   const stagedUploadsQuery = `
@@ -556,7 +560,7 @@ export async function runPriceUpdateBulkMutation(
           price: u.price,
           compareAtPrice: u.compareAtPrice,
         },
-      })
+      }),
     )
     .join("\n");
 
@@ -573,7 +577,7 @@ export async function runPriceUpdateBulkMutation(
   };
   const stagedUploadsResult = await callShopify(
     stagedUploadsQuery,
-    stagedUploadsInput
+    stagedUploadsInput,
   );
   const target = stagedUploadsResult.data.stagedUploadsCreate.stagedTargets[0];
   const { url, parameters } = target;
@@ -583,7 +587,7 @@ export async function runPriceUpdateBulkMutation(
   const uploadResponse = await fetch(url, { method: "POST", body: formData });
   if (!uploadResponse.ok)
     throw new Error(
-      `Failed to upload to staged target: ${await uploadResponse.text()}`
+      `Failed to upload to staged target: ${await uploadResponse.text()}`,
     );
   console.log("Successfully uploaded JSONL for price update bulk mutation.");
 
@@ -612,8 +616,8 @@ export async function runPriceUpdateBulkMutation(
   if (bulkOperationResult.data.bulkOperationRunMutation.userErrors.length > 0) {
     throw new Error(
       `Failed to start price bulk operation: ${JSON.stringify(
-        bulkOperationResult.data.bulkOperationRunMutation.userErrors
-      )}`
+        bulkOperationResult.data.bulkOperationRunMutation.userErrors,
+      )}`,
     );
   }
 
@@ -621,8 +625,38 @@ export async function runPriceUpdateBulkMutation(
   return bulkOperationResult.data.bulkOperationRunMutation.bulkOperation;
 }
 
+export async function updateProductStatus(
+  productId: string,
+  status: "ACTIVE" | "DRAFT",
+) {
+  const mutation = `
+    mutation productUpdate($input: ProductInput!) {
+      productUpdate(input: $input) {
+        product { id, status }
+        userErrors { field, message }
+      }
+    }
+  `;
+  const result = await callShopify(mutation, {
+    input: {
+      id: productId,
+      status,
+    },
+  });
+  const userErrors = result.data.productUpdate.userErrors;
+  if (userErrors.length > 0) {
+    throw new Error(
+      `Failed to update product status: ${JSON.stringify(userErrors)}`,
+    );
+  }
+  return result.data.productUpdate.product as {
+    id: string;
+    status: "ACTIVE" | "DRAFT" | "ARCHIVED";
+  };
+}
+
 export async function runStatusUpdateBulkMutation(
-  updates: { productId: string; status: "ACTIVE" | "DRAFT" }[]
+  updates: { productId: string; status: "ACTIVE" | "DRAFT" }[],
 ) {
   console.log(`Preparing bulk mutation for ${updates.length} status updates.`);
   const stagedUploadsQuery = `
@@ -640,7 +674,7 @@ export async function runStatusUpdateBulkMutation(
           id: u.productId,
           status: u.status,
         },
-      })
+      }),
     )
     .join("\n");
 
@@ -657,7 +691,7 @@ export async function runStatusUpdateBulkMutation(
   };
   const stagedUploadsResult = await callShopify(
     stagedUploadsQuery,
-    stagedUploadsInput
+    stagedUploadsInput,
   );
   const target = stagedUploadsResult.data.stagedUploadsCreate.stagedTargets[0];
   const { url, parameters } = target;
@@ -667,7 +701,7 @@ export async function runStatusUpdateBulkMutation(
   const uploadResponse = await fetch(url, { method: "POST", body: formData });
   if (!uploadResponse.ok)
     throw new Error(
-      `Failed to upload to staged target: ${await uploadResponse.text()}`
+      `Failed to upload to staged target: ${await uploadResponse.text()}`,
     );
   console.log("Successfully uploaded JSONL for status update bulk mutation.");
 
@@ -696,8 +730,8 @@ export async function runStatusUpdateBulkMutation(
   if (bulkOperationResult.data.bulkOperationRunMutation.userErrors.length > 0) {
     throw new Error(
       `Failed to start status bulk operation: ${JSON.stringify(
-        bulkOperationResult.data.bulkOperationRunMutation.userErrors
-      )}`
+        bulkOperationResult.data.bulkOperationRunMutation.userErrors,
+      )}`,
     );
   }
 
