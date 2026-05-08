@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "tsx --test tests/*.test.ts"
+    "test": "tsx --test tests/*.test.ts",
+    "diff:shopify-1c": "tsx scripts/diff-shopify-1c.ts"
   },
   "dependencies": {
     "@upstash/qstash": "^2.8.3",

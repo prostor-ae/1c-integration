@@ -35,6 +35,7 @@ Rotation is **manual**: rotate the value in the Vercel UI for the affected envir
 | `ONE_C_URL_1` | Vercel project envs (per env) | Update in Vercel UI, redeploy |
 | `ONE_C_URL_2` | Vercel project envs (per env) | Update in Vercel UI, redeploy |
 | `RESEND_API_KEY` | Vercel project envs (per env) | Rotate in Resend dashboard, update in Vercel UI, redeploy |
+| `CRON_SECRET` | Vercel project envs (production) | Rotate in Vercel UI, redeploy |
 | `API_VERSION` (optional) | Vercel project envs (per env) | Update in Vercel UI, redeploy. Defaults to `2024-07` if unset. |
 
 Alert emails are hardcoded in `src/app/lib/alerts.ts` to send from `notification@morlavi92.uk` to `chepiga.lev@gmail.com`; no `ALERT_FROM` or `ALERT_RECIPIENTS` environment variables are required.
@@ -63,6 +64,46 @@ Duplicate barcodes: <count>
 It always exits 0 and never mutates anything. Resolve all duplicates and blanks **before** triggering any sync.
 
 `tsx` is bundled in `devDependencies`, so `npx tsx ...` resolves from the local lockfile after `npm install`.
+
+## Local Shopify test-store ↔ 1C diff
+
+To inspect current differences without mutating either system, run:
+
+```bash
+npm run diff:shopify-1c
+```
+
+The script reads `.env.local` automatically when present, fetches the Shopify
+**test store** via `SHOPIFY_STORE_DOMAIN_TEST` / `SHOPIFY_ADMIN_TOKEN_TEST`, and
+compares it with the configured 1C price, discount, stock, and cost endpoints.
+Console output is overview-only: just the mismatch/data-gap counts and the
+generated report directory. Detailed rows are written to JSON files under
+`reports/shopify-1c-diff/<timestamp>/json/` and CSV files under
+`reports/shopify-1c-diff/<timestamp>/csv/` by default, including separate files
+for price differences, stock/status differences, cost differences, missing
+barcodes, blank/duplicate Shopify barcodes, truncated Shopify products, and
+invalid 1C values. Cost detail rows contain one expected 1C cost field
+(`expectedCost`) instead of duplicating the same value as `oneCCost`. It is
+read-only and exits `0` by default even when differences are found.
+
+Useful variants:
+
+```bash
+# Machine-readable overview in the console; details still go to files
+npm run diff:shopify-1c -- --json
+
+# Pick the report directory
+npm run diff:shopify-1c -- --output-dir=/tmp/shopify-1c-diff
+
+# Only compare daily-sync fields
+npm run diff:shopify-1c -- --modes=prices,stock
+
+# CI-style failure when drift/data gaps exist
+npm run diff:shopify-1c -- --fail-on-diff
+
+# Show fetch progress while still keeping stdout overview-only
+npm run diff:shopify-1c -- --verbose
+```
 
 ## Operations
 
@@ -126,6 +167,8 @@ Required production infrastructure:
 
 - **Upstash Redis via Vercel Marketplace**. This project expects `REDIS_URL` for durable orchestration state. If `REDIS_URL` is missing in production, sync acceptance fails closed with `503 { ok: false, error: "redis_required" }` and never falls back to long synchronous execution.
 - `SHOPIFY_API_VERSION=2026-04`.
+- `CRON_SECRET` for Vercel Cron authentication. Vercel sends it as
+  `Authorization: Bearer <CRON_SECRET>` when invoking cron routes.
 - `SHOPIFY_WEBHOOK_SECRET` (or `SHOPIFY_API_SECRET_KEY` / `SHOPIFY_CLIENT_SECRET`) for Shopify HMAC verification.
 - Register Shopify `bulk_operations/finish` webhook to `/api/webhooks/shopify/bulk-operations`.
 

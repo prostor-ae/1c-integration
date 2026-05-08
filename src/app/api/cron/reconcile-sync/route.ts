@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { isAuthorizedCronRequest } from "@/app/lib/cron-auth";
 import { isSyncConfigError, reconcileSyncRuns } from "@/app/lib/sync";
 
 export const runtime = "nodejs";
@@ -6,14 +7,7 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 export async function GET(request: Request) {
-  const apiKey = request.headers.get("x-api-key");
-  const isCron = request.headers.get("x-vercel-cron");
-
-  if (
-    process.env.VERCEL_ENV === "production" &&
-    !isCron &&
-    apiKey !== process.env.INTERNAL_API_KEY
-  ) {
+  if (!isAuthorizedCronRequest(request)) {
     return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
   }
 
