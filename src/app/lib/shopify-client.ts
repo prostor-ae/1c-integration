@@ -618,11 +618,7 @@ export async function fetchAllShopifyProductsAndVariants(): Promise<
 }
 
 export async function runPriceUpdateBulkMutation(
-  updates: {
-    variantId: string;
-    price: string;
-    compareAtPrice: string | null;
-  }[],
+  updates: PriceUpdateBulkMutationInput[],
 ) {
   console.log(`Preparing bulk mutation for ${updates.length} price updates.`);
   logSyncEvent("shopify_bulk_mutation_prepare", {
@@ -638,17 +634,7 @@ export async function runPriceUpdateBulkMutation(
       }
     }
   `;
-  const jsonl = updates
-    .map((u) =>
-      JSON.stringify({
-        input: {
-          id: u.variantId,
-          price: u.price,
-          compareAtPrice: u.compareAtPrice,
-        },
-      }),
-    )
-    .join("\n");
+  const jsonl = buildPriceUpdateBulkMutationJsonl(updates);
 
   // Steps 1 & 2: Staged Upload
   const stagedUploadsInput = {
@@ -695,14 +681,7 @@ export async function runPriceUpdateBulkMutation(
   });
 
   // Step 3: Run the bulk mutation
-  const bulkMutationQuery = `
-    mutation productVariantUpdate($input: ProductVariantInput!) {
-      productVariantUpdate(input: $input) {
-        productVariant { id, price, compareAtPrice }
-        userErrors { field, message }
-      }
-    }
-  `;
+  const bulkMutationQuery = PRICE_UPDATE_BULK_MUTATION;
   const bulkOperationRunMutation = `
     mutation bulkOperationRunMutation($mutation: String!, $stagedUploadPath: String!) {
       bulkOperationRunMutation(mutation: $mutation, stagedUploadPath: $stagedUploadPath) {
@@ -743,6 +722,42 @@ export async function runPriceUpdateBulkMutation(
     opStatus: bulkOperation?.status,
   });
   return bulkOperation;
+}
+
+export type PriceUpdateBulkMutationInput = {
+  productId: string;
+  variantId: string;
+  price: string;
+  compareAtPrice: string | null;
+};
+
+export const PRICE_UPDATE_BULK_MUTATION = `
+  mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+    productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+      product { id }
+      productVariants { id price compareAtPrice }
+      userErrors { field, message }
+    }
+  }
+`;
+
+export function buildPriceUpdateBulkMutationJsonl(
+  updates: PriceUpdateBulkMutationInput[],
+): string {
+  return updates
+    .map((u) =>
+      JSON.stringify({
+        productId: u.productId,
+        variants: [
+          {
+            id: u.variantId,
+            price: u.price,
+            compareAtPrice: u.compareAtPrice,
+          },
+        ],
+      }),
+    )
+    .join("\n");
 }
 
 export async function updateProductStatus(

@@ -449,6 +449,7 @@ async function startPricesModeStep(): Promise<ModeStepOutcome> {
 
   const products = await fetchAllShopifyProductsAndVariants();
   const updates: {
+    productId: string;
     variantId: string;
     price: string;
     compareAtPrice: string | null;
@@ -507,6 +508,7 @@ async function startPricesModeStep(): Promise<ModeStepOutcome> {
         currentCompareAtPriceStr !== newCompareAtPrice
       ) {
         updates.push({
+          productId: product.id,
           variantId: variant.id,
           price: newPrice,
           compareAtPrice: newCompareAtPrice,

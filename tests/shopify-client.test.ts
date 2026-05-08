@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildPriceUpdateBulkMutationJsonl,
   describeShopifyError,
   getShopifyLogContext,
   normalizeShopifyDomain,
+  PRICE_UPDATE_BULK_MUTATION,
 } from "../src/app/lib/shopify-client";
 
 test("normalizeShopifyDomain accepts bare domains and full URLs", () => {
@@ -91,4 +93,53 @@ test("getShopifyLogContext reports forced test target without exposing token", (
       }
     }
   }
+});
+
+test("price bulk mutation uses productVariantsBulkUpdate variables", () => {
+  assert.match(PRICE_UPDATE_BULK_MUTATION, /productVariantsBulkUpdate/);
+  assert.doesNotMatch(PRICE_UPDATE_BULK_MUTATION, /productVariantUpdate/);
+  assert.match(PRICE_UPDATE_BULK_MUTATION, /\$productId: ID!/);
+  assert.match(
+    PRICE_UPDATE_BULK_MUTATION,
+    /\$variants: \[ProductVariantsBulkInput!\]!/,
+  );
+
+  const jsonl = buildPriceUpdateBulkMutationJsonl([
+    {
+      productId: "gid://shopify/Product/1",
+      variantId: "gid://shopify/ProductVariant/2",
+      price: "12.34",
+      compareAtPrice: "15.00",
+    },
+    {
+      productId: "gid://shopify/Product/3",
+      variantId: "gid://shopify/ProductVariant/4",
+      price: "20.00",
+      compareAtPrice: null,
+    },
+  ]);
+
+  const rows = jsonl.split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(rows, [
+    {
+      productId: "gid://shopify/Product/1",
+      variants: [
+        {
+          id: "gid://shopify/ProductVariant/2",
+          price: "12.34",
+          compareAtPrice: "15.00",
+        },
+      ],
+    },
+    {
+      productId: "gid://shopify/Product/3",
+      variants: [
+        {
+          id: "gid://shopify/ProductVariant/4",
+          price: "20.00",
+          compareAtPrice: null,
+        },
+      ],
+    },
+  ]);
 });
