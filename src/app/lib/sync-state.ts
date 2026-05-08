@@ -205,10 +205,7 @@ export async function saveSyncRun(run: SyncRun, fencingToken?: string): Promise<
     throw new Error(`stale sync run transition rejected: ${run.runId}`);
   }
   if (fencingToken) {
-    const existingToken = existing?.fencingToken;
-    if (existingToken && existingToken !== fencingToken) {
-      throw new Error(`fencing token mismatch for sync run ${run.runId}`);
-    }
+    await assertCurrentLockOwner(run, fencingToken, redis);
     run.fencingToken = fencingToken;
   }
   run.updatedAt = nowIso();
@@ -226,6 +223,24 @@ export async function saveSyncRun(run: SyncRun, fencingToken?: string): Promise<
   } else {
     const activeRunId = await redis.get(activeKey(run.storeId));
     if (activeRunId === run.runId) await redis.del(activeKey(run.storeId));
+  }
+}
+
+async function assertCurrentLockOwner(
+  run: SyncRun,
+  fencingToken: string,
+  redis: RedisClientType | null,
+): Promise<void> {
+  if (!redis) {
+    if (memoryLock?.token !== fencingToken) {
+      throw new Error(`fencing token mismatch for sync run ${run.runId}`);
+    }
+    return;
+  }
+
+  const currentToken = await redis.get(lockKey(run.storeId));
+  if (currentToken !== fencingToken) {
+    throw new Error(`fencing token mismatch for sync run ${run.runId}`);
   }
 }
 
