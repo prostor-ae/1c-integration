@@ -1,8 +1,16 @@
 import { ApiError } from "next/dist/server/api-utils";
 import { sendBulkOpTimeoutAlert } from "./alerts";
 import { SHOPIFY_API_VERSION } from "./config";
+import {
+  getShopifyCredentials,
+  getShopifyLogContext,
+  normalizeShopifyDomain,
+} from "./shopify-env";
+import { logSyncEvent } from "./sync-logging";
 
 const API_VERSION = SHOPIFY_API_VERSION;
+
+export { getShopifyLogContext, normalizeShopifyDomain };
 
 type ShopifyErrorDetails = {
   name: string;
@@ -18,38 +26,7 @@ type ShopifyErrorDetails = {
 };
 
 function getShopifyEnv(isTest: boolean): { domain: string; token: string } {
-  isTest = true;
-  const rawDomain = isTest
-    ? process.env.SHOPIFY_STORE_DOMAIN_TEST
-    : process.env.SHOPIFY_STORE_DOMAIN;
-  const token = isTest
-    ? process.env.SHOPIFY_ADMIN_TOKEN_TEST
-    : process.env.SHOPIFY_ADMIN_TOKEN;
-
-  if (!rawDomain || !token) {
-    throw new Error(
-      `Missing ${
-        isTest
-          ? "SHOPIFY_STORE_DOMAIN_TEST/SHOPIFY_ADMIN_TOKEN_TEST"
-          : "SHOPIFY_STORE_DOMAIN/SHOPIFY_ADMIN_TOKEN"
-      } environment variables.`,
-    );
-  }
-  const domain = normalizeShopifyDomain(rawDomain);
-  return { domain, token };
-}
-
-export function normalizeShopifyDomain(rawDomain: string): string {
-  const domain = rawDomain
-    .trim()
-    .replace(/^https?:\/\//i, "")
-    .replace(/\/.*$/, "");
-
-  if (!domain) {
-    throw new Error("Shopify store domain is empty after normalization.");
-  }
-
-  return domain;
+  return getShopifyCredentials(isTest);
 }
 
 function getGraphQLOperationName(query: string): string | null {
@@ -185,8 +162,7 @@ export async function callShopify(
           maxAttempts: MAX_ATTEMPTS,
           retryable: true,
           operationName,
-          isTest: true,
-          domain: getShopifyEnv(isTest).domain,
+          ...getShopifyLogContext(isTest),
           error: describeShopifyError(error),
         }),
       );
@@ -417,6 +393,11 @@ export async function runCostUpdateBulkMutation(
   updates: { inventoryItemId: string; cost: number }[],
 ) {
   console.log(`Preparing bulk mutation for ${updates.length} cost updates.`);
+  logSyncEvent("shopify_bulk_mutation_prepare", {
+    mode: "costs",
+    updateCount: updates.length,
+    filename: "bulk-update-costs.jsonl",
+  });
   // 1. Create staged upload
   const stagedUploadsQuery = `
     mutation stagedUploadsCreate($input: [StagedUploadInput!]!) {
@@ -479,9 +460,26 @@ export async function runCostUpdateBulkMutation(
 
   if (!uploadResponse.ok) {
     const errorText = await uploadResponse.text();
+    logSyncEvent(
+      "shopify_bulk_mutation_jsonl_upload_failed",
+      {
+        mode: "costs",
+        updateCount: updates.length,
+        uploadStatus: uploadResponse.status,
+        uploadStatusText: uploadResponse.statusText,
+        error: errorText.slice(0, 1000),
+      },
+      "error",
+    );
     throw new Error(`Failed to upload to staged target: ${errorText}`);
   }
   console.log("Successfully uploaded JSONL file for bulk mutation.");
+  logSyncEvent("shopify_bulk_mutation_jsonl_uploaded", {
+    mode: "costs",
+    updateCount: updates.length,
+    jsonlLineCount: updates.length,
+    filename: "bulk-update-costs.jsonl",
+  });
 
   // 3. Run the bulk mutation
   const bulkMutationQuery = `
@@ -520,16 +518,33 @@ export async function runCostUpdateBulkMutation(
     stagedUploadPath: key,
   });
 
-  if (bulkOperationResult.data.bulkOperationRunMutation.userErrors.length > 0) {
+  const userErrors =
+    bulkOperationResult.data.bulkOperationRunMutation.userErrors;
+  if (userErrors.length > 0) {
+    logSyncEvent(
+      "shopify_bulk_mutation_start_failed",
+      {
+        mode: "costs",
+        updateCount: updates.length,
+        userErrors,
+      },
+      "error",
+    );
     throw new Error(
-      `Failed to start bulk operation: ${JSON.stringify(
-        bulkOperationResult.data.bulkOperationRunMutation.userErrors,
-      )}`,
+      `Failed to start bulk operation: ${JSON.stringify(userErrors)}`,
     );
   }
 
   console.log("Bulk mutation started successfully.");
-  return bulkOperationResult.data.bulkOperationRunMutation.bulkOperation;
+  const bulkOperation =
+    bulkOperationResult.data.bulkOperationRunMutation.bulkOperation;
+  logSyncEvent("shopify_bulk_mutation_started", {
+    mode: "costs",
+    updateCount: updates.length,
+    opId: bulkOperation?.id,
+    opStatus: bulkOperation?.status,
+  });
+  return bulkOperation;
 }
 
 export type ShopifyProductInfo = {
@@ -610,6 +625,11 @@ export async function runPriceUpdateBulkMutation(
   }[],
 ) {
   console.log(`Preparing bulk mutation for ${updates.length} price updates.`);
+  logSyncEvent("shopify_bulk_mutation_prepare", {
+    mode: "prices",
+    updateCount: updates.length,
+    filename: "price-updates.jsonl",
+  });
   const stagedUploadsQuery = `
     mutation stagedUploadsCreate($input: [StagedUploadInput!]!) {
       stagedUploadsCreate(input: $input) {
@@ -651,11 +671,28 @@ export async function runPriceUpdateBulkMutation(
   parameters.forEach(({ name, value }: any) => formData.append(name, value));
   formData.append("file", new Blob([jsonl], { type: "application/jsonl" }));
   const uploadResponse = await fetch(url, { method: "POST", body: formData });
-  if (!uploadResponse.ok)
-    throw new Error(
-      `Failed to upload to staged target: ${await uploadResponse.text()}`,
+  if (!uploadResponse.ok) {
+    const errorText = await uploadResponse.text();
+    logSyncEvent(
+      "shopify_bulk_mutation_jsonl_upload_failed",
+      {
+        mode: "prices",
+        updateCount: updates.length,
+        uploadStatus: uploadResponse.status,
+        uploadStatusText: uploadResponse.statusText,
+        error: errorText.slice(0, 1000),
+      },
+      "error",
     );
+    throw new Error(`Failed to upload to staged target: ${errorText}`);
+  }
   console.log("Successfully uploaded JSONL for price update bulk mutation.");
+  logSyncEvent("shopify_bulk_mutation_jsonl_uploaded", {
+    mode: "prices",
+    updateCount: updates.length,
+    jsonlLineCount: updates.length,
+    filename: "price-updates.jsonl",
+  });
 
   // Step 3: Run the bulk mutation
   const bulkMutationQuery = `
@@ -679,16 +716,33 @@ export async function runPriceUpdateBulkMutation(
     mutation: bulkMutationQuery,
     stagedUploadPath: key,
   });
-  if (bulkOperationResult.data.bulkOperationRunMutation.userErrors.length > 0) {
+  const userErrors =
+    bulkOperationResult.data.bulkOperationRunMutation.userErrors;
+  if (userErrors.length > 0) {
+    logSyncEvent(
+      "shopify_bulk_mutation_start_failed",
+      {
+        mode: "prices",
+        updateCount: updates.length,
+        userErrors,
+      },
+      "error",
+    );
     throw new Error(
-      `Failed to start price bulk operation: ${JSON.stringify(
-        bulkOperationResult.data.bulkOperationRunMutation.userErrors,
-      )}`,
+      `Failed to start price bulk operation: ${JSON.stringify(userErrors)}`,
     );
   }
 
   console.log("Price update bulk mutation started successfully.");
-  return bulkOperationResult.data.bulkOperationRunMutation.bulkOperation;
+  const bulkOperation =
+    bulkOperationResult.data.bulkOperationRunMutation.bulkOperation;
+  logSyncEvent("shopify_bulk_mutation_started", {
+    mode: "prices",
+    updateCount: updates.length,
+    opId: bulkOperation?.id,
+    opStatus: bulkOperation?.status,
+  });
+  return bulkOperation;
 }
 
 export async function updateProductStatus(
@@ -725,6 +779,11 @@ export async function runStatusUpdateBulkMutation(
   updates: { productId: string; status: "ACTIVE" | "DRAFT" }[],
 ) {
   console.log(`Preparing bulk mutation for ${updates.length} status updates.`);
+  logSyncEvent("shopify_bulk_mutation_prepare", {
+    mode: "stock",
+    updateCount: updates.length,
+    filename: "status-updates.jsonl",
+  });
   const stagedUploadsQuery = `
     mutation stagedUploadsCreate($input: [StagedUploadInput!]!) {
       stagedUploadsCreate(input: $input) {
@@ -765,11 +824,28 @@ export async function runStatusUpdateBulkMutation(
   parameters.forEach(({ name, value }: any) => formData.append(name, value));
   formData.append("file", new Blob([jsonl], { type: "application/jsonl" }));
   const uploadResponse = await fetch(url, { method: "POST", body: formData });
-  if (!uploadResponse.ok)
-    throw new Error(
-      `Failed to upload to staged target: ${await uploadResponse.text()}`,
+  if (!uploadResponse.ok) {
+    const errorText = await uploadResponse.text();
+    logSyncEvent(
+      "shopify_bulk_mutation_jsonl_upload_failed",
+      {
+        mode: "stock",
+        updateCount: updates.length,
+        uploadStatus: uploadResponse.status,
+        uploadStatusText: uploadResponse.statusText,
+        error: errorText.slice(0, 1000),
+      },
+      "error",
     );
+    throw new Error(`Failed to upload to staged target: ${errorText}`);
+  }
   console.log("Successfully uploaded JSONL for status update bulk mutation.");
+  logSyncEvent("shopify_bulk_mutation_jsonl_uploaded", {
+    mode: "stock",
+    updateCount: updates.length,
+    jsonlLineCount: updates.length,
+    filename: "status-updates.jsonl",
+  });
 
   // Step 3: Run the bulk mutation
   const bulkMutationQuery = `
@@ -793,14 +869,31 @@ export async function runStatusUpdateBulkMutation(
     mutation: bulkMutationQuery,
     stagedUploadPath: key,
   });
-  if (bulkOperationResult.data.bulkOperationRunMutation.userErrors.length > 0) {
+  const userErrors =
+    bulkOperationResult.data.bulkOperationRunMutation.userErrors;
+  if (userErrors.length > 0) {
+    logSyncEvent(
+      "shopify_bulk_mutation_start_failed",
+      {
+        mode: "stock",
+        updateCount: updates.length,
+        userErrors,
+      },
+      "error",
+    );
     throw new Error(
-      `Failed to start status bulk operation: ${JSON.stringify(
-        bulkOperationResult.data.bulkOperationRunMutation.userErrors,
-      )}`,
+      `Failed to start status bulk operation: ${JSON.stringify(userErrors)}`,
     );
   }
 
   console.log("Status update bulk mutation started successfully.");
-  return bulkOperationResult.data.bulkOperationRunMutation.bulkOperation;
+  const bulkOperation =
+    bulkOperationResult.data.bulkOperationRunMutation.bulkOperation;
+  logSyncEvent("shopify_bulk_mutation_started", {
+    mode: "stock",
+    updateCount: updates.length,
+    opId: bulkOperation?.id,
+    opStatus: bulkOperation?.status,
+  });
+  return bulkOperation;
 }
