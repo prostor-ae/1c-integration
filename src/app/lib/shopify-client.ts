@@ -4,16 +4,29 @@ import { SHOPIFY_API_VERSION } from "./config";
 
 const API_VERSION = SHOPIFY_API_VERSION;
 
+type ShopifyErrorDetails = {
+  name: string;
+  message: string;
+  causeName?: string;
+  causeMessage?: string;
+  code?: string;
+  errno?: string | number;
+  syscall?: string;
+  hostname?: string;
+  address?: string;
+  port?: string | number;
+};
+
 function getShopifyEnv(isTest: boolean): { domain: string; token: string } {
   isTest = true;
-  const domain = isTest
+  const rawDomain = isTest
     ? process.env.SHOPIFY_STORE_DOMAIN_TEST
     : process.env.SHOPIFY_STORE_DOMAIN;
   const token = isTest
     ? process.env.SHOPIFY_ADMIN_TOKEN_TEST
     : process.env.SHOPIFY_ADMIN_TOKEN;
 
-  if (!domain || !token) {
+  if (!rawDomain || !token) {
     throw new Error(
       `Missing ${
         isTest
@@ -22,7 +35,52 @@ function getShopifyEnv(isTest: boolean): { domain: string; token: string } {
       } environment variables.`,
     );
   }
+  const domain = normalizeShopifyDomain(rawDomain);
   return { domain, token };
+}
+
+export function normalizeShopifyDomain(rawDomain: string): string {
+  const domain = rawDomain
+    .trim()
+    .replace(/^https?:\/\//i, "")
+    .replace(/\/.*$/, "");
+
+  if (!domain) {
+    throw new Error("Shopify store domain is empty after normalization.");
+  }
+
+  return domain;
+}
+
+function getGraphQLOperationName(query: string): string | null {
+  const match = query.match(/\b(query|mutation)\s+([A-Za-z0-9_]+)/);
+  return match?.[2] ?? null;
+}
+
+export function describeShopifyError(error: any): ShopifyErrorDetails {
+  const cause = error?.cause;
+  return {
+    name: error?.name ?? "Error",
+    message: error?.message ?? String(error),
+    causeName: cause?.name,
+    causeMessage: cause?.message,
+    code: cause?.code ?? error?.code,
+    errno: cause?.errno ?? error?.errno,
+    syscall: cause?.syscall ?? error?.syscall,
+    hostname: cause?.hostname ?? error?.hostname,
+    address: cause?.address ?? error?.address,
+    port: cause?.port ?? error?.port,
+  };
+}
+
+function formatShopifyErrorForMessage(error: any): string {
+  const details = describeShopifyError(error);
+  const parts = [details.message];
+  if (details.causeMessage) parts.push(`cause=${details.causeMessage}`);
+  if (details.code) parts.push(`code=${details.code}`);
+  if (details.hostname) parts.push(`hostname=${details.hostname}`);
+  if (details.syscall) parts.push(`syscall=${details.syscall}`);
+  return parts.join("; ");
 }
 
 async function shopifyFetch(
@@ -93,6 +151,7 @@ export async function callShopify(
   isTest: boolean = false,
 ) {
   let lastError: any = null;
+  const operationName = getGraphQLOperationName(query);
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
       const data = await shopifyFetch(query, variables, isTest);
@@ -120,7 +179,16 @@ export async function callShopify(
         throw error;
       }
       console.error(
-        `callShopify attempt ${attempt}/${MAX_ATTEMPTS} failed (retryable): ${error.message}`,
+        JSON.stringify({
+          event: "shopify_call_retry",
+          attempt,
+          maxAttempts: MAX_ATTEMPTS,
+          retryable: true,
+          operationName,
+          isTest: true,
+          domain: getShopifyEnv(isTest).domain,
+          error: describeShopifyError(error),
+        }),
       );
       if (attempt < MAX_ATTEMPTS) {
         const backoffMs = 1000 * attempt;
@@ -129,9 +197,7 @@ export async function callShopify(
     }
   }
   throw new Error(
-    `Shopify retries exhausted after ${MAX_ATTEMPTS} attempts: ${
-      lastError?.message ?? "unknown error"
-    }`,
+    `Shopify retries exhausted after ${MAX_ATTEMPTS} attempts: ${formatShopifyErrorForMessage(lastError)}`,
   );
 }
 
