@@ -19,7 +19,7 @@ async function shopifyGraphQL(
   domain: string,
   token: string,
   query: string,
-  variables: Record<string, unknown>
+  variables: Record<string, unknown>,
 ): Promise<any> {
   const url = `https://${domain}/admin/api/${API_VERSION}/graphql.json`;
   const res = await fetch(url, {
@@ -43,7 +43,7 @@ async function shopifyGraphQL(
 
 async function fetchAllVariants(
   domain: string,
-  token: string
+  token: string,
 ): Promise<VariantRow[]> {
   const rows: VariantRow[] = [];
   let cursor: string | null = null;
@@ -92,7 +92,7 @@ async function main() {
   const token = process.env.SHOPIFY_ADMIN_TOKEN;
   if (!domain || !token) {
     throw new Error(
-      "SHOPIFY_STORE_DOMAIN and SHOPIFY_ADMIN_TOKEN env vars are required"
+      "SHOPIFY_STORE_DOMAIN and SHOPIFY_ADMIN_TOKEN env vars are required",
     );
   }
 
@@ -115,7 +115,7 @@ async function main() {
     if (list.length > 1) duplicates.push([barcode, list]);
   });
 
-  console.log(`Variants with blank barcode: ${blank.length}`);
+  console.log(`Variants with blank barcode ${blank.length}`);
   for (const v of blank.slice(0, 100)) {
     console.log(`  ${v.productHandle} | ${v.variantId}`);
   }
