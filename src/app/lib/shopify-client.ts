@@ -554,10 +554,35 @@ export type ShopifyProductInfo = {
   variants: {
     id: string;
     barcode: string;
+    sku?: string | null;
     price: string;
     compareAtPrice: string | null;
   }[];
 };
+
+function uniqueNonEmptyValues(values: string[]): string[] {
+  return Array.from(
+    new Set(
+      values.map((value) => value.trim()).filter((value) => value !== ""),
+    ),
+  );
+}
+
+function formatShopifySearchValue(value: string): string {
+  if (/^[A-Za-z0-9_-]+$/.test(value)) return value;
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+export function buildVariantIdentifierSearchQuery(
+  identifiers: string[],
+): string {
+  return uniqueNonEmptyValues(identifiers)
+    .flatMap((identifier) => {
+      const value = formatShopifySearchValue(identifier);
+      return [`barcode:${value}`, `sku:${value}`];
+    })
+    .join(" OR ");
+}
 
 export async function fetchAllShopifyProductsAndVariants(): Promise<
   Map<string, ShopifyProductInfo>
@@ -614,6 +639,94 @@ export async function fetchAllShopifyProductsAndVariants(): Promise<
   }
 
   console.log(`Finished fetching all products. Total: ${products.size}`);
+  return products;
+}
+
+export async function fetchShopifyProductsAndVariantsByIdentifiers(
+  identifiers: string[],
+): Promise<Map<string, ShopifyProductInfo>> {
+  const uniqueIdentifiers = uniqueNonEmptyValues(identifiers);
+  const products = new Map<string, ShopifyProductInfo>();
+  if (uniqueIdentifiers.length === 0) return products;
+
+  logSyncEvent("shopify_variant_identifier_lookup_started", {
+    identifierCount: uniqueIdentifiers.length,
+  });
+
+  const query = `
+    query productVariantsByIdentifier($query: String!, $cursor: String) {
+      productVariants(first: 100, after: $cursor, query: $query) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        edges {
+          node {
+            id
+            barcode
+            sku
+            price
+            compareAtPrice
+            product {
+              id
+              handle
+              status
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const chunkSize = 25;
+  let matchedVariants = 0;
+  for (let i = 0; i < uniqueIdentifiers.length; i += chunkSize) {
+    const chunk = uniqueIdentifiers.slice(i, i + chunkSize);
+    const searchQuery = buildVariantIdentifierSearchQuery(chunk);
+    let cursor = null;
+    let hasNextPage = true;
+
+    while (hasNextPage) {
+      const data = await callShopify(query, { query: searchQuery, cursor });
+      const connection = data.data.productVariants;
+
+      connection.edges.forEach((edge: any) => {
+        const node = edge.node;
+        const productNode = node.product;
+        if (!productNode?.id) return;
+
+        const product: ShopifyProductInfo = products.get(productNode.id) ?? {
+          id: productNode.id,
+          handle: productNode.handle,
+          status: productNode.status,
+          variants: [],
+        };
+
+        if (!product.variants.some((variant) => variant.id === node.id)) {
+          product.variants.push({
+            id: node.id,
+            barcode: node.barcode ?? "",
+            sku: node.sku ?? null,
+            price: node.price,
+            compareAtPrice: node.compareAtPrice,
+          });
+          matchedVariants += 1;
+        }
+
+        products.set(product.id, product);
+      });
+
+      hasNextPage = connection.pageInfo.hasNextPage;
+      cursor = connection.pageInfo.endCursor;
+    }
+  }
+
+  logSyncEvent("shopify_variant_identifier_lookup_completed", {
+    identifierCount: uniqueIdentifiers.length,
+    matchedProductCount: products.size,
+    matchedVariantCount: matchedVariants,
+  });
+
   return products;
 }
 

@@ -16,6 +16,7 @@ function product(
   id: string,
   status: ShopifyProductInfo["status"],
   barcode: string,
+  sku?: string,
 ): ShopifyProductInfo {
   return {
     id,
@@ -25,6 +26,7 @@ function product(
       {
         id: `${id}-variant`,
         barcode,
+        sku,
         price: "1.00",
         compareAtPrice: null,
       },
@@ -73,14 +75,33 @@ test("1C webhook rejects missing or wrong x-api-key", async () => {
 
 test("1C webhook rejects invalid JSON before Shopify processing", async () => {
   process.env.ONE_C_WEBHOOK_KEY = "secret";
+  const logs: string[] = [];
+  const originalLog = console.log;
+  console.log = (message?: any) => {
+    logs.push(String(message));
+  };
 
-  const response = await oneCWebhookPost(
-    webhookRequest({ "x-api-key": "secret" }, "not-json"),
-  );
-  const body = await response.json();
+  try {
+    const response = await oneCWebhookPost(
+      webhookRequest({ "x-api-key": "secret" }, "not-json"),
+    );
+    const body = await response.json();
 
-  assert.equal(response.status, 400);
-  assert.equal(body.error, "invalid_json");
+    assert.equal(response.status, 400);
+    assert.equal(body.error, "invalid_json");
+    assert.ok(
+      logs.some((line) => {
+        const parsed = JSON.parse(line);
+        return (
+          parsed.event === "1c_webhook_request_body" &&
+          parsed.body === "not-json" &&
+          parsed.bodyLength === 8
+        );
+      }),
+    );
+  } finally {
+    console.log = originalLog;
+  }
 });
 
 test("parseOneCWebhookItems requires a non-empty Items object with exact Yes/No values", () => {
@@ -133,11 +154,15 @@ test("processOneCWebhookItems maps barcode Yes/No to direct product ACTIVE/DRAFT
     productId: string;
     status: "ACTIVE" | "DRAFT";
   }> = [];
+  let requestedIdentifiers: string[] = [];
 
   const result = await processOneCWebhookItems(
     { "481": "Yes", "482": "No", "483": "No", unknown: "Yes" },
     {
-      fetchProducts: async () => products,
+      fetchProductsByIdentifiers: async (identifiers) => {
+        requestedIdentifiers = identifiers;
+        return products;
+      },
       updateProductStatus: async (productId, status) => {
         capturedUpdates.push({ productId, status });
         return { id: productId, status };
@@ -145,6 +170,7 @@ test("processOneCWebhookItems maps barcode Yes/No to direct product ACTIVE/DRAFT
     },
   );
 
+  assert.deepEqual(requestedIdentifiers, ["481", "482", "483", "unknown"]);
   assert.deepEqual(capturedUpdates, [
     { productId: "gid://shopify/Product/1", status: "ACTIVE" },
     { productId: "gid://shopify/Product/2", status: "DRAFT" },
@@ -174,7 +200,7 @@ test("processOneCWebhookItems does not run a Shopify mutation when all matches a
   const result = await processOneCWebhookItems(
     { "481": "Yes", unknown: "No" },
     {
-      fetchProducts: async () => products,
+      fetchProductsByIdentifiers: async () => products,
       updateProductStatus: async () => {
         mutationCalled = true;
         return { id: "should-not-run", status: "ACTIVE" };
@@ -188,4 +214,37 @@ test("processOneCWebhookItems does not run a Shopify mutation when all matches a
   assert.equal(result.unknown, 1);
   assert.equal(result.applied, 0);
   assert.deepEqual(result.updatedProducts, []);
+});
+
+test("processOneCWebhookItems also matches payload keys against SKU", async () => {
+  const products = new Map<string, ShopifyProductInfo>([
+    [
+      "gid://shopify/Product/1",
+      product("gid://shopify/Product/1", "DRAFT", "", "SKU-481"),
+    ],
+  ]);
+  const capturedUpdates: Array<{
+    productId: string;
+    status: "ACTIVE" | "DRAFT";
+  }> = [];
+
+  const result = await processOneCWebhookItems(
+    { "SKU-481": "Yes" },
+    {
+      fetchProductsByIdentifiers: async () => products,
+      updateProductStatus: async (productId, status) => {
+        capturedUpdates.push({ productId, status });
+        return { id: productId, status };
+      },
+    },
+  );
+
+  assert.deepEqual(capturedUpdates, [
+    { productId: "gid://shopify/Product/1", status: "ACTIVE" },
+  ]);
+  assert.equal(result.received, 1);
+  assert.equal(result.matched, 1);
+  assert.equal(result.unknown, 0);
+  assert.equal(result.proposed, 1);
+  assert.equal(result.applied, 1);
 });

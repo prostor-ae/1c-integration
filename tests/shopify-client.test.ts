@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildPriceUpdateBulkMutationJsonl,
+  buildVariantIdentifierSearchQuery,
   describeShopifyError,
   getShopifyLogContext,
   normalizeShopifyDomain,
@@ -93,6 +94,13 @@ test("getShopifyLogContext reports forced test target without exposing token", (
       }
     }
   }
+});
+
+test("buildVariantIdentifierSearchQuery targets barcode and SKU fields", () => {
+  assert.equal(
+    buildVariantIdentifierSearchQuery(["481", "SKU-1", "481", "ABC 123"]),
+    'barcode:481 OR sku:481 OR barcode:SKU-1 OR sku:SKU-1 OR barcode:"ABC 123" OR sku:"ABC 123"',
+  );
 });
 
 test("price bulk mutation uses productVariantsBulkUpdate variables", () => {

@@ -1,5 +1,5 @@
 import {
-  fetchAllShopifyProductsAndVariants,
+  fetchShopifyProductsAndVariantsByIdentifiers,
   updateProductStatus,
   type ShopifyProductInfo,
 } from "@/app/lib/shopify-client";
@@ -9,7 +9,9 @@ type ShopifyStatus = "ACTIVE" | "DRAFT";
 type ShopifyStatusUpdate = { productId: string; status: ShopifyStatus };
 
 type ProcessDeps = {
-  fetchProducts: () => Promise<Map<string, ShopifyProductInfo>>;
+  fetchProductsByIdentifiers: (
+    identifiers: string[],
+  ) => Promise<Map<string, ShopifyProductInfo>>;
   updateProductStatus: (
     productId: string,
     status: ShopifyStatus,
@@ -17,7 +19,7 @@ type ProcessDeps = {
 };
 
 const DEFAULT_DEPS: ProcessDeps = {
-  fetchProducts: fetchAllShopifyProductsAndVariants,
+  fetchProductsByIdentifiers: fetchShopifyProductsAndVariantsByIdentifiers,
   updateProductStatus,
 };
 
@@ -63,16 +65,22 @@ export function buildStatusUpdatesFromWebhookItems(
     statusByProduct.set(product.id, product.status);
 
     for (const variant of product.variants) {
-      if (!variant.barcode || !(variant.barcode in items)) continue;
+      const identifiers = [variant.barcode, variant.sku].filter(
+        (identifier): identifier is string =>
+          typeof identifier === "string" && identifier !== "",
+      );
 
-      knownBarcodes.add(variant.barcode);
-      const desiredStatus =
-        items[variant.barcode] === "Yes" ? "ACTIVE" : "DRAFT";
-      const previous = desiredByProduct.get(product.id);
+      for (const identifier of identifiers) {
+        if (!(identifier in items)) continue;
 
-      // Product-level status is ACTIVE if any payload-mentioned variant is Yes.
-      if (previous !== "ACTIVE")
-        desiredByProduct.set(product.id, desiredStatus);
+        knownBarcodes.add(identifier);
+        const desiredStatus = items[identifier] === "Yes" ? "ACTIVE" : "DRAFT";
+        const previous = desiredByProduct.get(product.id);
+
+        // Product-level status is ACTIVE if any payload-mentioned variant is Yes.
+        if (previous !== "ACTIVE")
+          desiredByProduct.set(product.id, desiredStatus);
+      }
     }
   });
 
@@ -108,7 +116,7 @@ export async function processOneCWebhookItems(
   items: Record<string, OneCAvailability>,
   deps: ProcessDeps = DEFAULT_DEPS,
 ) {
-  const products = await deps.fetchProducts();
+  const products = await deps.fetchProductsByIdentifiers(Object.keys(items));
   const result = buildStatusUpdatesFromWebhookItems(products, items);
   const updatedProducts = [];
 

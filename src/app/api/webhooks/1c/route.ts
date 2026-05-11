@@ -27,9 +27,18 @@ export async function POST(req: Request) {
       return jsonError("unauthorized", 401);
     }
 
+    const rawBody = await req.text();
+    console.log(
+      JSON.stringify({
+        event: "1c_webhook_request_body",
+        bodyLength: rawBody.length,
+        body: rawBody,
+      }),
+    );
+
     let body: unknown;
     try {
-      body = await req.json();
+      body = JSON.parse(rawBody);
     } catch {
       console.warn(JSON.stringify({ event: "1c_webhook_invalid_json" }));
       return jsonError("invalid_json", 400);
