@@ -40,6 +40,8 @@ Rotation is **manual**: rotate the value in the Vercel UI for the affected envir
 
 Alert emails are hardcoded in `src/app/lib/alerts.ts` to send from `notification@morlavi92.uk` to `chepiga.lev@gmail.com`; no `ALERT_FROM` or `ALERT_RECIPIENTS` environment variables are required.
 
+The `/api/webhooks/1c` product-status webhook also sends a best-effort alert when a valid 1C payload contains barcodes that are not found in Shopify. The webhook still succeeds for matched products, skips unknown barcodes as before, and sends one aggregated email per request rather than one email per barcode. If Resend is unavailable, the alert failure is logged and the webhook response is not failed by email delivery.
+
 ## Pre-flight
 
 Before the **first prod sync**, audit the Shopify catalog for blank or duplicate barcodes. Barcode is the join key between 1C and Shopify, so duplicates cause silent mis-updates.
@@ -79,12 +81,15 @@ compares it with the configured 1C price, discount, stock, and cost endpoints.
 Console output is overview-only: just the mismatch/data-gap counts and the
 generated report directory. Detailed rows are written to JSON files under
 `reports/shopify-1c-diff/<timestamp>/json/` and CSV files under
-`reports/shopify-1c-diff/<timestamp>/csv/` by default, including separate files
-for price differences, stock/status differences, cost differences, missing
-barcodes, blank/duplicate Shopify barcodes, truncated Shopify products, and
-invalid 1C values. Cost detail rows contain one expected 1C cost field
-(`expectedCost`) instead of duplicating the same value as `oneCCost`. It is
-read-only and exits `0` by default even when differences are found.
+`reports/shopify-1c-diff/<timestamp>/csv/` by default. The same tabular detail
+is also exported as one workbook at
+`reports/shopify-1c-diff/<timestamp>/excel/shopify-1c-diff.xlsx`, with one sheet
+per category. Outputs include separate details for price differences,
+stock/status differences, cost differences, missing barcodes, blank/duplicate
+Shopify barcodes, truncated Shopify products, and invalid 1C values. Cost
+detail rows contain one expected 1C cost field (`expectedCost`) instead of
+duplicating the same value as `oneCCost`. It is read-only and exits `0` by
+default even when differences are found.
 
 Useful variants:
 

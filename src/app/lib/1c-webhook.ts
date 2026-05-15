@@ -3,6 +3,10 @@ import {
   updateProductStatus,
   type ShopifyProductInfo,
 } from "@/app/lib/shopify-client";
+import {
+  sendMissingBarcodeAlert,
+  type MissingBarcodeAlertArgs,
+} from "@/app/lib/alerts";
 
 type OneCAvailability = "Yes" | "No";
 type ShopifyStatus = "ACTIVE" | "DRAFT";
@@ -16,11 +20,15 @@ type ProcessDeps = {
     productId: string,
     status: ShopifyStatus,
   ) => Promise<{ id: string; status: ShopifyProductInfo["status"] }>;
+  sendMissingBarcodeAlert?: (
+    args: MissingBarcodeAlertArgs,
+  ) => Promise<void>;
 };
 
 const DEFAULT_DEPS: ProcessDeps = {
   fetchProductsByIdentifiers: fetchShopifyProductsAndVariantsByIdentifiers,
   updateProductStatus,
+  sendMissingBarcodeAlert,
 };
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -128,10 +136,33 @@ export async function processOneCWebhookItems(
     updatedProducts.push(updatedProduct);
   }
 
-  return {
+  const response = {
     ...result.counts,
     applied: updatedProducts.length,
     updatedProducts,
     unknownBarcodes: result.unknownBarcodes,
   };
+
+  if (response.unknownBarcodes.length > 0 && deps.sendMissingBarcodeAlert) {
+    try {
+      await deps.sendMissingBarcodeAlert({
+        received: response.received,
+        matched: response.matched,
+        unknown: response.unknown,
+        unchanged: response.unchanged,
+        proposed: response.proposed,
+        applied: response.applied,
+        unknownBarcodes: response.unknownBarcodes,
+      });
+    } catch (error: any) {
+      console.error(
+        JSON.stringify({
+          event: "missing_barcode_alert_failed",
+          error: error?.message ?? String(error),
+        }),
+      );
+    }
+  }
+
+  return response;
 }

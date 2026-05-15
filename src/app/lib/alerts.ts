@@ -5,8 +5,19 @@ type SendAlertArgs = {
   body: string;
 };
 
+export type MissingBarcodeAlertArgs = {
+  received: number;
+  matched: number;
+  unknown: number;
+  unchanged: number;
+  proposed: number;
+  applied: number;
+  unknownBarcodes: string[];
+};
+
 export const ALERT_EMAIL_FROM = "notification@morlavi92.uk";
 export const ALERT_EMAIL_RECIPIENT = "chepiga.lev@gmail.com";
+const MISSING_BARCODE_ALERT_SAMPLE_LIMIT = 25;
 
 function getResendConfig(): {
   apiKey: string;
@@ -44,6 +55,46 @@ export async function sendAlert({ subject, body }: SendAlertArgs): Promise<void>
       })
     );
   }
+}
+
+export async function sendMissingBarcodeAlert({
+  received,
+  matched,
+  unknown,
+  unchanged,
+  proposed,
+  applied,
+  unknownBarcodes,
+}: MissingBarcodeAlertArgs): Promise<void> {
+  const sample = unknownBarcodes.slice(0, MISSING_BARCODE_ALERT_SAMPLE_LIMIT);
+  const hiddenCount = Math.max(unknownBarcodes.length - sample.length, 0);
+  const sampleLines = sample
+    .map((barcode) => `  - ${barcode}`)
+    .join("\n");
+
+  const subject = `[1c-integration] 1C webhook unknown Shopify barcodes (${unknown})`;
+  const body = [
+    `A 1C webhook payload included barcodes that were not found in Shopify.`,
+    ``,
+    `The webhook processing stays best-effort: matched products were handled, unknown barcodes were skipped, and this email is informational.`,
+    ``,
+    `Received barcodes:  ${received}`,
+    `Matched barcodes:   ${matched}`,
+    `Unknown barcodes:   ${unknown}`,
+    `Unchanged products: ${unchanged}`,
+    `Proposed updates:   ${proposed}`,
+    `Applied updates:    ${applied}`,
+    ``,
+    `Unknown barcode sample (up to ${MISSING_BARCODE_ALERT_SAMPLE_LIMIT}):`,
+    sampleLines || "  (none captured)",
+    hiddenCount > 0 ? `  ...and ${hiddenCount} more` : null,
+    ``,
+    `Action: add or correct these product variant barcodes in Shopify, then let the next 1C webhook retry update their statuses.`,
+  ]
+    .filter((line): line is string => line !== null)
+    .join("\n");
+
+  await sendAlert({ subject, body });
 }
 
 export async function sendSafetyFloorAlert({

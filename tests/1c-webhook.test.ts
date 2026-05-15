@@ -5,6 +5,7 @@ import {
   parseOneCWebhookItems,
   processOneCWebhookItems,
 } from "../src/app/lib/1c-webhook";
+import type { MissingBarcodeAlertArgs } from "../src/app/lib/alerts";
 import type { ShopifyProductInfo } from "../src/app/lib/shopify-client";
 
 beforeEach(() => {
@@ -154,6 +155,7 @@ test("processOneCWebhookItems maps barcode Yes/No to direct product ACTIVE/DRAFT
     productId: string;
     status: "ACTIVE" | "DRAFT";
   }> = [];
+  const capturedAlerts: MissingBarcodeAlertArgs[] = [];
   let requestedIdentifiers: string[] = [];
 
   const result = await processOneCWebhookItems(
@@ -166,6 +168,9 @@ test("processOneCWebhookItems maps barcode Yes/No to direct product ACTIVE/DRAFT
       updateProductStatus: async (productId, status) => {
         capturedUpdates.push({ productId, status });
         return { id: productId, status };
+      },
+      sendMissingBarcodeAlert: async (args) => {
+        capturedAlerts.push(args);
       },
     },
   );
@@ -182,6 +187,16 @@ test("processOneCWebhookItems maps barcode Yes/No to direct product ACTIVE/DRAFT
   assert.equal(result.proposed, 2);
   assert.deepEqual(result.unknownBarcodes, ["unknown"]);
   assert.equal(result.applied, 2);
+  assert.equal(capturedAlerts.length, 1);
+  assert.deepEqual(capturedAlerts[0], {
+    received: 4,
+    matched: 3,
+    unknown: 1,
+    unchanged: 1,
+    proposed: 2,
+    applied: 2,
+    unknownBarcodes: ["unknown"],
+  });
   assert.deepEqual(result.updatedProducts, [
     { id: "gid://shopify/Product/1", status: "ACTIVE" },
     { id: "gid://shopify/Product/2", status: "DRAFT" },
@@ -196,24 +211,40 @@ test("processOneCWebhookItems does not run a Shopify mutation when all matches a
     ],
   ]);
   let mutationCalled = false;
+  const errors: string[] = [];
+  const originalError = console.error;
+  console.error = (message?: unknown) => {
+    errors.push(String(message));
+  };
 
-  const result = await processOneCWebhookItems(
-    { "481": "Yes", unknown: "No" },
-    {
-      fetchProductsByIdentifiers: async () => products,
-      updateProductStatus: async () => {
-        mutationCalled = true;
-        return { id: "should-not-run", status: "ACTIVE" };
+  try {
+    const result = await processOneCWebhookItems(
+      { "481": "Yes", unknown: "No" },
+      {
+        fetchProductsByIdentifiers: async () => products,
+        updateProductStatus: async () => {
+          mutationCalled = true;
+          return { id: "should-not-run", status: "ACTIVE" };
+        },
+        sendMissingBarcodeAlert: async () => {
+          throw new Error("resend unavailable");
+        },
       },
-    },
-  );
+    );
 
-  assert.equal(mutationCalled, false);
-  assert.equal(result.proposed, 0);
-  assert.equal(result.unchanged, 1);
-  assert.equal(result.unknown, 1);
-  assert.equal(result.applied, 0);
-  assert.deepEqual(result.updatedProducts, []);
+    assert.equal(mutationCalled, false);
+    assert.equal(result.proposed, 0);
+    assert.equal(result.unchanged, 1);
+    assert.equal(result.unknown, 1);
+    assert.equal(result.applied, 0);
+    assert.deepEqual(result.updatedProducts, []);
+    assert.equal(errors.length, 1);
+    const logged = JSON.parse(errors[0]);
+    assert.equal(logged.event, "missing_barcode_alert_failed");
+    assert.match(logged.error, /resend unavailable/);
+  } finally {
+    console.error = originalError;
+  }
 });
 
 test("processOneCWebhookItems also matches payload keys against SKU", async () => {
@@ -227,6 +258,7 @@ test("processOneCWebhookItems also matches payload keys against SKU", async () =
     productId: string;
     status: "ACTIVE" | "DRAFT";
   }> = [];
+  let missingBarcodeAlertCalled = false;
 
   const result = await processOneCWebhookItems(
     { "SKU-481": "Yes" },
@@ -235,6 +267,9 @@ test("processOneCWebhookItems also matches payload keys against SKU", async () =
       updateProductStatus: async (productId, status) => {
         capturedUpdates.push({ productId, status });
         return { id: productId, status };
+      },
+      sendMissingBarcodeAlert: async () => {
+        missingBarcodeAlertCalled = true;
       },
     },
   );
@@ -247,4 +282,5 @@ test("processOneCWebhookItems also matches payload keys against SKU", async () =
   assert.equal(result.unknown, 0);
   assert.equal(result.proposed, 1);
   assert.equal(result.applied, 1);
+  assert.equal(missingBarcodeAlertCalled, false);
 });

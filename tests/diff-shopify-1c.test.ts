@@ -186,6 +186,7 @@ test("buildDiffReport reports Shopify test-store drift and barcode data gaps", (
     assert.ok(
       fs.existsSync(path.join(tempDir, "csv", "one-c-stock-barcodes-missing-in-shopify.csv")),
     );
+    assert.ok(fs.existsSync(path.join(tempDir, "excel", "shopify-1c-diff.xlsx")));
 
     const overviewJson = JSON.parse(
       fs.readFileSync(path.join(tempDir, "json", "overview.json"), "utf8"),
@@ -193,8 +194,14 @@ test("buildDiffReport reports Shopify test-store drift and barcode data gaps", (
     assert.equal(overviewJson.summary.totalDifferences, 11);
     assert.ok(overviewJson.jsonDirectory.endsWith("/json"));
     assert.ok(overviewJson.csvDirectory.endsWith("/csv"));
+    assert.ok(overviewJson.excelDirectory.endsWith("/excel"));
     assert.ok(overviewJson.files.json["cost-differences.json"].endsWith("json/cost-differences.json"));
     assert.ok(overviewJson.files.csv["cost-differences.csv"].endsWith("csv/cost-differences.csv"));
+    assert.ok(
+      overviewJson.files.excel["shopify-1c-diff.xlsx"].endsWith(
+        "excel/shopify-1c-diff.xlsx",
+      ),
+    );
 
     const priceRows = JSON.parse(
       fs.readFileSync(path.join(tempDir, "json", "price-differences.json"), "utf8"),
@@ -212,7 +219,45 @@ test("buildDiffReport reports Shopify test-store drift and barcode data gaps", (
     assert.match(costCsv, /^barcode,productHandle,productId,variantId,inventoryItemId,currentCost,expectedCost,source\n/);
     assert.match(costCsv, /111,shirt/);
     assert.doesNotMatch(costCsv, /oneCCost/);
+
+    const excelWorkbook = fs.readFileSync(
+      path.join(tempDir, "excel", "shopify-1c-diff.xlsx"),
+    );
+    const excelEntries = readZipEntryNames(excelWorkbook);
+    assert.ok(excelEntries.includes("[Content_Types].xml"));
+    assert.ok(excelEntries.includes("xl/workbook.xml"));
+    assert.ok(excelEntries.includes("xl/worksheets/sheet1.xml"));
+
+    const excelText = excelWorkbook.toString("utf8");
+    assert.match(excelText, /^PK/);
+    assert.match(excelText, /price-differences/);
+    assert.match(excelText, /stock-status-differences/);
+    assert.match(excelText, /cost-differences/);
+    assert.match(excelText, /expectedCost/);
+    assert.doesNotMatch(excelText, /oneCCost/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+function readZipEntryNames(zip: Buffer): string[] {
+  const eocdOffset = zip.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+  assert.notEqual(eocdOffset, -1);
+
+  const entryCount = zip.readUInt16LE(eocdOffset + 10);
+  let centralOffset = zip.readUInt32LE(eocdOffset + 16);
+  const names: string[] = [];
+
+  for (let index = 0; index < entryCount; index++) {
+    assert.equal(zip.readUInt32LE(centralOffset), 0x02014b50);
+    const nameLength = zip.readUInt16LE(centralOffset + 28);
+    const extraLength = zip.readUInt16LE(centralOffset + 30);
+    const commentLength = zip.readUInt16LE(centralOffset + 32);
+    const nameStart = centralOffset + 46;
+    const nameEnd = nameStart + nameLength;
+    names.push(zip.toString("utf8", nameStart, nameEnd));
+    centralOffset = nameEnd + extraLength + commentLength;
+  }
+
+  return names;
+}
