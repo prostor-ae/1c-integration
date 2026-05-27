@@ -6,6 +6,7 @@ import {
   getShopifyLogContext,
   normalizeShopifyDomain,
 } from "./shopify-env";
+import { parseShopifyWeightMetafieldKg } from "./product-weight";
 import { logSyncEvent } from "./sync-logging";
 
 const API_VERSION = SHOPIFY_API_VERSION;
@@ -339,7 +340,7 @@ export async function getBulkOperationById(
 export async function fetchAllShopifyVariants() {
   const variants = new Map<
     string,
-    { inventoryItemId: string; cost: string | null }
+    { inventoryItemId: string; cost: string | null; weightKg: number | null }
   >();
   let cursor = null;
   let hasNextPage = true;
@@ -357,6 +358,11 @@ export async function fetchAllShopifyVariants() {
           edges {
             node {
               barcode
+              product {
+                weightMetafield: metafield(namespace: "custom", key: "weight") {
+                  value
+                }
+              }
               inventoryItem {
                 id
                 unitCost {
@@ -376,6 +382,9 @@ export async function fetchAllShopifyVariants() {
         variants.set(edge.node.barcode, {
           inventoryItemId: edge.node.inventoryItem.id,
           cost: edge.node.inventoryItem.unitCost?.amount ?? null,
+          weightKg: parseShopifyWeightMetafieldKg(
+            edge.node.product?.weightMetafield,
+          ),
         });
       }
     });
@@ -551,6 +560,7 @@ export type ShopifyProductInfo = {
   id: string;
   handle: string;
   status: "ACTIVE" | "DRAFT" | "ARCHIVED";
+  weightKg: number | null;
   variants: {
     id: string;
     barcode: string;
@@ -606,6 +616,9 @@ export async function fetchAllShopifyProductsAndVariants(): Promise<
               id
               handle
               status
+              weightMetafield: metafield(namespace: "custom", key: "weight") {
+                value
+              }
               variants(first: 100) {
                 edges {
                   node {
@@ -629,6 +642,7 @@ export async function fetchAllShopifyProductsAndVariants(): Promise<
         id: edge.node.id,
         handle: edge.node.handle,
         status: edge.node.status,
+        weightKg: parseShopifyWeightMetafieldKg(edge.node.weightMetafield),
         variants: edge.node.variants.edges.map((vEdge: any) => vEdge.node),
       });
     });
@@ -671,6 +685,9 @@ export async function fetchShopifyProductsAndVariantsByIdentifiers(
               id
               handle
               status
+              weightMetafield: metafield(namespace: "custom", key: "weight") {
+                value
+              }
             }
           }
         }
@@ -699,6 +716,9 @@ export async function fetchShopifyProductsAndVariantsByIdentifiers(
           id: productNode.id,
           handle: productNode.handle,
           status: productNode.status,
+          weightKg: parseShopifyWeightMetafieldKg(
+            productNode.weightMetafield,
+          ),
           variants: [],
         };
 

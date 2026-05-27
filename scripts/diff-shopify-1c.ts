@@ -10,6 +10,10 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import {
+  applyShopifyWeight,
+  parseShopifyWeightMetafieldKg,
+} from "../src/app/lib/product-weight";
 
 type Mode = "prices" | "stock" | "costs";
 
@@ -44,6 +48,7 @@ type ShopifyProductSnapshot = {
   handle: string;
   title: string | null;
   status: "ACTIVE" | "DRAFT" | "ARCHIVED" | string;
+  weightKg?: number | null;
   variants: ShopifyVariantSnapshot[];
   variantsTruncated: boolean;
 };
@@ -62,6 +67,7 @@ type ShopifyVariantRef = {
   inventoryItemId: string | null;
   cost: string | null;
   costCurrencyCode: string | null;
+  weightKg: number | null;
 };
 
 export type PriceDifference = {
@@ -472,6 +478,9 @@ async function fetchShopifyTestStoreProducts({
               handle
               title
               status
+              weightMetafield: metafield(namespace: "custom", key: "weight") {
+                value
+              }
               variants(first: 100) {
                 pageInfo { hasNextPage }
                 edges {
@@ -504,6 +513,7 @@ async function fetchShopifyTestStoreProducts({
         handle: edge.node.handle,
         title: edge.node.title ?? null,
         status: edge.node.status,
+        weightKg: parseShopifyWeightMetafieldKg(edge.node.weightMetafield),
         variants: edge.node.variants.edges.map((variantEdge: any) => ({
           id: variantEdge.node.id,
           title: variantEdge.node.title ?? null,
@@ -795,6 +805,7 @@ function buildShopifyBarcodeIndex(products: ShopifyProductSnapshot[]): {
         inventoryItemId: variant.inventoryItem?.id ?? null,
         cost: variant.inventoryItem?.unitCost?.amount ?? null,
         costCurrencyCode: variant.inventoryItem?.unitCost?.currencyCode ?? null,
+        weightKg: product.weightKg ?? null,
       };
       const variants = byBarcode.get(barcode) ?? [];
       variants.push(ref);
@@ -830,12 +841,14 @@ function buildPriceDifferences(
     if (price === undefined) return;
 
     const discount = discounts[barcode];
-    const priceStr = money(price);
-    const hasValidDiscount = discount !== undefined && discount < price;
-    const expectedPrice = hasValidDiscount ? money(discount) : priceStr;
-    const expectedCompareAtPrice = hasValidDiscount ? priceStr : null;
-
     variants.forEach((variant) => {
+      const weightedPrice = applyShopifyWeight(price, variant.weightKg);
+      const priceStr = money(weightedPrice);
+      const hasValidDiscount = discount !== undefined && discount < price;
+      const expectedPrice = hasValidDiscount
+        ? money(applyShopifyWeight(discount, variant.weightKg))
+        : priceStr;
+      const expectedCompareAtPrice = hasValidDiscount ? priceStr : null;
       const currentPrice = moneyOrNull(variant.price);
       const currentCompareAtPrice = moneyOrNull(variant.compareAtPrice);
       if (
@@ -919,7 +932,9 @@ function buildCostDifferences(
 
     variants.forEach((variant) => {
       const currentCost = moneyOrNull(variant.cost);
-      const expectedCost = money(expected.cost);
+      const expectedCost = money(
+        applyShopifyWeight(expected.cost, variant.weightKg),
+      );
       if (currentCost !== expectedCost) {
         rows.push({
           barcode,

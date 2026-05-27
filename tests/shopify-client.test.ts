@@ -8,6 +8,11 @@ import {
   normalizeShopifyDomain,
   PRICE_UPDATE_BULK_MUTATION,
 } from "../src/app/lib/shopify-client";
+import {
+  applyShopifyWeight,
+  parseShopifyWeightKg,
+  parseShopifyWeightMetafieldKg,
+} from "../src/app/lib/product-weight";
 
 test("normalizeShopifyDomain accepts bare domains and full URLs", () => {
   assert.equal(
@@ -150,4 +155,14 @@ test("price bulk mutation uses productVariantsBulkUpdate variables", () => {
       ],
     },
   ]);
+});
+
+test("product weight helpers parse positive decimal kg values and fallback on invalid values", () => {
+  assert.equal(parseShopifyWeightKg("0.5"), 0.5);
+  assert.equal(parseShopifyWeightMetafieldKg({ value: "1.25" }), 1.25);
+  assert.equal(parseShopifyWeightKg(""), null);
+  assert.equal(parseShopifyWeightKg("0"), null);
+  assert.equal(parseShopifyWeightKg("not-a-number"), null);
+  assert.equal(applyShopifyWeight(30, 0.5), 15);
+  assert.equal(applyShopifyWeight(30, null), 30);
 });

@@ -41,6 +41,7 @@ import {
   type SyncRun,
 } from "./sync-state";
 import { logSyncEvent, summarizeSyncRun } from "./sync-logging";
+import { applyShopifyWeight } from "./product-weight";
 
 export type { ModeResult, SyncMode, SyncResult } from "./sync-types";
 
@@ -384,13 +385,17 @@ async function startCostsModeStep(): Promise<ModeStepOutcome> {
   costs1c.forEach((cost, barcode) => {
     const variant = variantsShopify.get(barcode);
     if (!variant) return;
-    const newCostStr = Number(cost).toFixed(2);
+    const weightedCost = applyShopifyWeight(Number(cost), variant.weightKg);
+    const newCostStr = Number(weightedCost).toFixed(2);
     const currentCostStr =
       variant.cost !== undefined && variant.cost !== null
         ? Number(variant.cost).toFixed(2)
         : null;
     if (currentCostStr !== newCostStr) {
-      updates.push({ inventoryItemId: variant.inventoryItemId, cost });
+      updates.push({
+        inventoryItemId: variant.inventoryItemId,
+        cost: Number(newCostStr),
+      });
     }
   });
 
@@ -466,14 +471,17 @@ async function startPricesModeStep(): Promise<ModeStepOutcome> {
       if (priceRaw === undefined || priceRaw === null) return;
       variantsWith1cPrices += 1;
 
-      const priceStr = Number(priceRaw).toFixed(2);
+      const price = applyShopifyWeight(Number(priceRaw), product.weightKg);
+      const priceStr = Number(price).toFixed(2);
       const discountRaw = discounts1c[variant.barcode];
       const hasValidDiscount =
         discountRaw !== undefined &&
         discountRaw !== null &&
-        Number(discountRaw) < Number(priceStr);
+        Number(discountRaw) < Number(priceRaw);
       const newPrice = hasValidDiscount
-        ? Number(discountRaw).toFixed(2)
+        ? Number(
+            applyShopifyWeight(Number(discountRaw), product.weightKg),
+          ).toFixed(2)
         : priceStr;
       const newCompareAtPrice: string | null = hasValidDiscount
         ? priceStr

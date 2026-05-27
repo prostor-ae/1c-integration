@@ -240,6 +240,55 @@ test("buildDiffReport reports Shopify test-store drift and barcode data gaps", (
   }
 });
 
+test("buildDiffReport applies product custom.weight to 1C prices, discounts, and costs", () => {
+  const report = buildDiffReport({
+    generatedAt: "2026-05-08T00:00:00.000Z",
+    shopifyDomain: "test-shop.myshopify.com",
+    apiVersion: "2026-04",
+    modes: ["prices", "costs"],
+    products: [
+      {
+        id: "gid://shopify/Product/weighted",
+        handle: "weighted-coffee",
+        title: "Weighted Coffee",
+        status: "ACTIVE",
+        weightKg: 0.5,
+        variantsTruncated: false,
+        variants: [
+          {
+            id: "gid://shopify/ProductVariant/weighted",
+            title: null,
+            sku: "WEIGHTED",
+            barcode: "W-1",
+            price: "30.00",
+            compareAtPrice: null,
+            inventoryItem: {
+              id: "gid://shopify/InventoryItem/weighted",
+              unitCost: { amount: "30.00", currencyCode: "AED" },
+            },
+          },
+        ],
+      },
+    ],
+    oneC: {
+      prices: { "W-1": 30 },
+      discounts: { "W-1": 20 },
+      stock: {},
+      alqitharaCosts: { "W-1": 30 },
+      localCosts: {},
+      invalidValues: [],
+    },
+  });
+
+  assert.equal(report.summary.priceDifferences, 1);
+  assert.deepEqual(report.differences.prices[0].expected, {
+    price: "10.00",
+    compareAtPrice: "15.00",
+  });
+  assert.equal(report.summary.costDifferences, 1);
+  assert.equal(report.differences.costs[0].expectedCost, "15.00");
+});
+
 function readZipEntryNames(zip: Buffer): string[] {
   const eocdOffset = zip.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
   assert.notEqual(eocdOffset, -1);
