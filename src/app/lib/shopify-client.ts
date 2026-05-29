@@ -35,6 +35,25 @@ function getGraphQLOperationName(query: string): string | null {
   return match?.[2] ?? null;
 }
 
+function truncateForLog(value: string, maxLength = 2000): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength)}…[truncated ${value.length - maxLength} chars]`;
+}
+
+function formatShopifyGraphQLError(json: any): string {
+  const errors = Array.isArray(json?.errors)
+    ? json.errors.map((error: any) => ({
+        message: error?.message,
+        path: error?.path,
+        code: error?.extensions?.code,
+        field: error?.extensions?.field,
+      }))
+    : json?.errors;
+  const cost = json?.extensions?.cost;
+  const payload = cost ? { errors, cost } : { errors };
+  return `Shopify GraphQL Error: ${truncateForLog(JSON.stringify(payload))}`;
+}
+
 export function describeShopifyError(error: any): ShopifyErrorDetails {
   const cause = error?.cause;
   return {
@@ -52,8 +71,11 @@ export function describeShopifyError(error: any): ShopifyErrorDetails {
 }
 
 function formatShopifyErrorForMessage(error: any): string {
+  if (!error) {
+    return "no retryable error details were captured";
+  }
   const details = describeShopifyError(error);
-  const parts = [details.message];
+  const parts = [details.message || details.name || String(error)];
   if (details.causeMessage) parts.push(`cause=${details.causeMessage}`);
   if (details.code) parts.push(`code=${details.code}`);
   if (details.hostname) parts.push(`hostname=${details.hostname}`);
@@ -88,11 +110,10 @@ async function shopifyFetch(
 
   const json = await res.json();
   if (json.errors && json.errors.length) {
-    // Inspect for THROTTLED so callShopify can decide to retry vs re-throw.
-    throw new ApiError(
-      400,
-      "Shopify GraphQL Error: " + JSON.stringify(json.errors),
-    );
+    // Include sanitized GraphQL cost/throttle details so retry-exhaustion
+    // emails explain whether Shopify throttling, schema/userErrors, or another
+    // GraphQL failure caused the async Vercel sync continuation to fail.
+    throw new ApiError(400, formatShopifyGraphQLError(json));
   }
   return json;
 }
@@ -140,13 +161,22 @@ export async function callShopify(
 
       const cost = data.extensions.cost;
       const bucket = cost.throttleStatus;
-      const shortfall = cost.requestedQueryCost - bucket.currentlyAvailable;
+      const currentAvailable = Number(bucket?.currentlyAvailable);
+      const requestedQueryCost = Number(cost?.requestedQueryCost);
 
-      if (shortfall > 0) {
-        const waitMs = (shortfall / bucket.restoreRate) * 1000 + 100; // +100 ms buffer
-        console.log(`Throttled, waiting ${waitMs.toFixed(2)}ms`);
-        await new Promise((r) => setTimeout(r, waitMs));
-        continue;
+      if (
+        Number.isFinite(currentAvailable) &&
+        Number.isFinite(requestedQueryCost) &&
+        currentAvailable < requestedQueryCost
+      ) {
+        logSyncEvent("shopify_call_low_throttle_budget_after_success", {
+          operationName,
+          ...getShopifyLogContext(isTest),
+          requestedQueryCost,
+          actualQueryCost: cost.actualQueryCost ?? null,
+          currentlyAvailable: currentAvailable,
+          restoreRate: bucket?.restoreRate,
+        });
       }
 
       return data;
