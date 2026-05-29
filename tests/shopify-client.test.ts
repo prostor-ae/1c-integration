@@ -13,6 +13,10 @@ import {
   parseShopifyWeightKg,
   parseShopifyWeightMetafieldKg,
 } from "../src/app/lib/product-weight";
+import {
+  isSyncableOneCDiscount,
+  isSyncableOneCPrice,
+} from "../src/app/lib/one-c-values";
 
 test("normalizeShopifyDomain accepts bare domains and full URLs", () => {
   assert.equal(
@@ -165,4 +169,13 @@ test("product weight helpers parse positive decimal kg values and fallback on in
   assert.equal(parseShopifyWeightKg("not-a-number"), null);
   assert.equal(applyShopifyWeight(30, 0.5), 15);
   assert.equal(applyShopifyWeight(30, null), 30);
+});
+
+test("1C price helpers treat non-positive prices and discounts as not syncable", () => {
+  assert.equal(isSyncableOneCPrice(139.65), true);
+  assert.equal(isSyncableOneCPrice(0), false);
+  assert.equal(isSyncableOneCPrice(-1), false);
+  assert.equal(isSyncableOneCDiscount(20, 30), true);
+  assert.equal(isSyncableOneCDiscount(0, 30), false);
+  assert.equal(isSyncableOneCDiscount(30, 30), false);
 });

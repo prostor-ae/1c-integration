@@ -174,6 +174,7 @@ test("buildDiffReport reports Shopify test-store drift and barcode data gaps", (
     assert.ok(fs.existsSync(path.join(tempDir, "json", "overview.json")));
     assert.ok(fs.existsSync(path.join(tempDir, "json", "full-report.json")));
     assert.ok(fs.existsSync(path.join(tempDir, "json", "price-differences.json")));
+    assert.ok(fs.existsSync(path.join(tempDir, "json", "one-c-non-positive-prices.json")));
     assert.ok(fs.existsSync(path.join(tempDir, "json", "stock-status-differences.json")));
     assert.ok(fs.existsSync(path.join(tempDir, "json", "cost-differences.json")));
     assert.ok(
@@ -181,6 +182,7 @@ test("buildDiffReport reports Shopify test-store drift and barcode data gaps", (
     );
     assert.ok(fs.existsSync(path.join(tempDir, "csv", "overview.csv")));
     assert.ok(fs.existsSync(path.join(tempDir, "csv", "price-differences.csv")));
+    assert.ok(fs.existsSync(path.join(tempDir, "csv", "one-c-non-positive-prices.csv")));
     assert.ok(fs.existsSync(path.join(tempDir, "csv", "stock-status-differences.csv")));
     assert.ok(fs.existsSync(path.join(tempDir, "csv", "cost-differences.csv")));
     assert.ok(
@@ -287,6 +289,61 @@ test("buildDiffReport applies product custom.weight to 1C prices, discounts, and
   });
   assert.equal(report.summary.costDifferences, 1);
   assert.equal(report.differences.costs[0].expectedCost, "15.00");
+});
+
+test("buildDiffReport highlights non-positive 1C prices without proposing a zero-price update", () => {
+  const report = buildDiffReport({
+    generatedAt: "2026-05-08T00:00:00.000Z",
+    shopifyDomain: "test-shop.myshopify.com",
+    apiVersion: "2026-04",
+    modes: ["prices"],
+    products: [
+      {
+        id: "gid://shopify/Product/zero",
+        handle: "zero-price-product",
+        title: "Zero Price Product",
+        status: "DRAFT",
+        weightKg: 0.3,
+        variantsTruncated: false,
+        variants: [
+          {
+            id: "gid://shopify/ProductVariant/zero",
+            title: null,
+            sku: "ZERO",
+            barcode: "000026",
+            price: "75.00",
+            compareAtPrice: null,
+            inventoryItem: null,
+          },
+        ],
+      },
+    ],
+    oneC: {
+      prices: { "000026": 0 },
+      discounts: {},
+      stock: {},
+      alqitharaCosts: {},
+      localCosts: {},
+      invalidValues: [],
+    },
+  });
+
+  assert.equal(report.summary.priceDifferences, 0);
+  assert.deepEqual(report.differences.prices, []);
+  assert.equal(report.summary.oneCNonPositivePrices, 1);
+  assert.deepEqual(report.dataGaps.oneCNonPositivePrices, [
+    {
+      barcode: "000026",
+      productHandle: "zero-price-product",
+      productId: "gid://shopify/Product/zero",
+      variantId: "gid://shopify/ProductVariant/zero",
+      sku: "ZERO",
+      current: { price: "75.00", compareAtPrice: null },
+      oneCPrice: 0,
+      reason: "non_positive_price",
+    },
+  ]);
+  assert.equal(report.summary.totalDifferences, 1);
 });
 
 function readZipEntryNames(zip: Buffer): string[] {

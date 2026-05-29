@@ -141,6 +141,11 @@ sync multiplies the 1C value by that weight before comparing or updating the
 variant price / compare-at price / inventory item cost (for example, `30 × 0.5kg
 = 15.00`). Missing or invalid weights use multiplier `1`.
 
+Price sync skips non-positive 1C base prices (`0` or lower) instead of updating
+Shopify variants to `0.00`. The read-only `diff:shopify-1c` report still
+highlights those barcodes separately in `one-c-non-positive-prices.*` so they
+can be fixed in 1C without being mixed into normal price-update differences.
+
 The 20% safety floor only applies to `stock` mode: if more than 20% of currently-ACTIVE products would flip to DRAFT, the bulk op is skipped, an alert email is sent from `notification@morlavi92.uk` to `chepiga.lev@gmail.com`, and the run returns `results.stock.skipped` with the percentage. Other modes have no percentage floor — only an empty-payload check per 1C endpoint.
 
 If a previous bulk op is still RUNNING/CREATED when a mode starts, that mode is skipped (Shopify allows only one bulk op per app at a time) and a conflict alert is emailed.

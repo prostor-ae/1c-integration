@@ -42,6 +42,7 @@ import {
 } from "./sync-state";
 import { logSyncEvent, summarizeSyncRun } from "./sync-logging";
 import { applyShopifyWeight } from "./product-weight";
+import { isSyncableOneCDiscount, isSyncableOneCPrice } from "./one-c-values";
 
 export type { ModeResult, SyncMode, SyncResult } from "./sync-types";
 
@@ -462,6 +463,7 @@ async function startPricesModeStep(): Promise<ModeStepOutcome> {
   let discountRemovedCount = 0;
   let variantsWithBarcodes = 0;
   let variantsWith1cPrices = 0;
+  let variantsSkippedForNonPositive1cPrice = 0;
 
   products.forEach((product) => {
     product.variants.forEach((variant) => {
@@ -470,14 +472,18 @@ async function startPricesModeStep(): Promise<ModeStepOutcome> {
       const priceRaw = prices1c[variant.barcode];
       if (priceRaw === undefined || priceRaw === null) return;
       variantsWith1cPrices += 1;
+      if (!isSyncableOneCPrice(priceRaw)) {
+        variantsSkippedForNonPositive1cPrice += 1;
+        return;
+      }
 
       const price = applyShopifyWeight(Number(priceRaw), product.weightKg);
       const priceStr = Number(price).toFixed(2);
       const discountRaw = discounts1c[variant.barcode];
-      const hasValidDiscount =
-        discountRaw !== undefined &&
-        discountRaw !== null &&
-        Number(discountRaw) < Number(priceRaw);
+      const hasValidDiscount = isSyncableOneCDiscount(
+        discountRaw,
+        priceRaw,
+      );
       const newPrice = hasValidDiscount
         ? Number(
             applyShopifyWeight(Number(discountRaw), product.weightKg),
@@ -533,6 +539,7 @@ async function startPricesModeStep(): Promise<ModeStepOutcome> {
     shopifyVariantCount: countShopifyVariants(products),
     variantsWithBarcodes,
     variantsWith1cPrices,
+    variantsSkippedForNonPositive1cPrice,
     proposedUpdates: updates.length,
     discountRemovedCount,
   });

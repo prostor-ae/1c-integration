@@ -14,10 +14,19 @@ import {
   applyShopifyWeight,
   parseShopifyWeightMetafieldKg,
 } from "../src/app/lib/product-weight";
+import {
+  isSyncableOneCDiscount,
+  isSyncableOneCPrice,
+} from "../src/app/lib/one-c-values";
 
 type Mode = "prices" | "stock" | "costs";
 
-type OneCSource = "prices" | "discounts" | "stock" | "alqitharaCosts" | "localCosts";
+type OneCSource =
+  | "prices"
+  | "discounts"
+  | "stock"
+  | "alqitharaCosts"
+  | "localCosts";
 
 type OneCValueMap = Record<string, number>;
 
@@ -130,6 +139,20 @@ export type ShopifyBarcodeMissingPrice = {
   sku: string | null;
 };
 
+export type OneCNonPositivePrice = {
+  barcode: string;
+  productHandle: string;
+  productId: string;
+  variantId: string;
+  sku: string | null;
+  current: {
+    price: string | null;
+    compareAtPrice: string | null;
+  };
+  oneCPrice: number;
+  reason: "non_positive_price";
+};
+
 export type DiffReport = {
   generatedAt: string;
   shopify: {
@@ -151,6 +174,7 @@ export type DiffReport = {
     blankShopifyBarcodeVariants: number;
     duplicateShopifyBarcodeGroups: number;
     shopifyBarcodesMissingIn1cPrices: number;
+    oneCNonPositivePrices: number;
     discountBarcodesWithoutBasePrice: number;
     oneCBarcodesMissingInShopify: number;
     truncatedShopifyProducts: number;
@@ -166,6 +190,7 @@ export type DiffReport = {
     blankShopifyBarcodeVariants: MissingShopifyBarcode[];
     duplicateShopifyBarcodes: DuplicateShopifyBarcode[];
     shopifyBarcodesMissingIn1cPrices: ShopifyBarcodeMissingPrice[];
+    oneCNonPositivePrices: OneCNonPositivePrice[];
     discountBarcodesWithoutBasePrice: string[];
     oneCBarcodesMissingInShopify: {
       prices: string[];
@@ -296,11 +321,17 @@ function parseArgs(argv: string[]): CliOptions {
         .filter(Boolean);
       const invalid = rawModes.filter((mode) => !isMode(mode));
       if (invalid.length) {
-        throw new Error(`Invalid mode(s): ${invalid.join(", ")}. Use prices,stock,costs.`);
+        throw new Error(
+          `Invalid mode(s): ${invalid.join(", ")}. Use prices,stock,costs.`,
+        );
       }
-      const uniqueModes = DEFAULT_MODES.filter((mode) => rawModes.includes(mode));
+      const uniqueModes = DEFAULT_MODES.filter((mode) =>
+        rawModes.includes(mode),
+      );
       if (!uniqueModes.length) {
-        throw new Error("--modes must include at least one of prices,stock,costs.");
+        throw new Error(
+          "--modes must include at least one of prices,stock,costs.",
+        );
       }
       options.modes = uniqueModes;
     } else if (arg === "--help" || arg === "-h") {
@@ -405,7 +436,9 @@ async function shopifyGraphQL(
 
       const text = await res.text();
       if (!res.ok) {
-        throw new Error(`Shopify HTTP ${res.status}: ${res.statusText} - ${text}`);
+        throw new Error(
+          `Shopify HTTP ${res.status}: ${res.statusText} - ${text}`,
+        );
       }
 
       const json = JSON.parse(text);
@@ -419,8 +452,10 @@ async function shopifyGraphQL(
 
       return json;
     } catch (error: any) {
-      const baseError = error instanceof Error ? error : new Error(String(error));
-      const cause = (baseError as Error & { cause?: { message?: string } }).cause;
+      const baseError =
+        error instanceof Error ? error : new Error(String(error));
+      const cause = (baseError as Error & { cause?: { message?: string } })
+        .cause;
       lastError = cause?.message
         ? new Error(`${baseError.message}: ${cause.message}`)
         : baseError;
@@ -454,7 +489,9 @@ async function fetchShopifyTestStoreProducts({
   const rawDomain = process.env.SHOPIFY_STORE_DOMAIN_TEST;
   const token = process.env.SHOPIFY_ADMIN_TOKEN_TEST;
   const apiVersion =
-    process.env.SHOPIFY_API_VERSION || process.env.API_VERSION || DEFAULT_API_VERSION;
+    process.env.SHOPIFY_API_VERSION ||
+    process.env.API_VERSION ||
+    DEFAULT_API_VERSION;
 
   if (!rawDomain || !token) {
     throw new Error(
@@ -506,7 +543,9 @@ async function fetchShopifyTestStoreProducts({
         }
       }
     `;
-    const data = await shopifyGraphQL(domain, token, apiVersion, query, { cursor });
+    const data = await shopifyGraphQL(domain, token, apiVersion, query, {
+      cursor,
+    });
     for (const edge of data.data.products.edges) {
       products.push({
         id: edge.node.id,
@@ -527,7 +566,8 @@ async function fetchShopifyTestStoreProducts({
                 unitCost: variantEdge.node.inventoryItem.unitCost
                   ? {
                       amount: variantEdge.node.inventoryItem.unitCost.amount,
-                      currencyCode: variantEdge.node.inventoryItem.unitCost.currencyCode,
+                      currencyCode:
+                        variantEdge.node.inventoryItem.unitCost.currencyCode,
                     }
                   : null,
               }
@@ -577,7 +617,9 @@ async function fetchOneCData(
   const res = await fetch(url, { headers });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Failed to fetch ${source} from 1C: ${res.status} ${res.statusText} - ${text}`);
+    throw new Error(
+      `Failed to fetch ${source} from 1C: ${res.status} ${res.statusText} - ${text}`,
+    );
   }
 
   const json = await res.json();
@@ -594,7 +636,8 @@ async function fetchOneCData(
     items[barcode] = numeric;
   });
 
-  if (verbose) console.error(`Fetched 1C ${source}: ${Object.keys(items).length}`);
+  if (verbose)
+    console.error(`Fetched 1C ${source}: ${Object.keys(items).length}`);
   return { items, invalidValues };
 }
 
@@ -611,11 +654,22 @@ async function fetchOneCSnapshot(
   const wantsStock = modes.includes("stock");
   const wantsCosts = modes.includes("costs");
 
-  const entries: Array<[OneCSource, Promise<{ items: OneCValueMap; invalidValues: InvalidOneCValue[] }>]> = [];
+  const entries: Array<
+    [
+      OneCSource,
+      Promise<{ items: OneCValueMap; invalidValues: InvalidOneCValue[] }>,
+    ]
+  > = [];
 
   if (wantsPrices) {
-    entries.push(["prices", fetchOneCData("prices", endpoints.prices, verbose)]);
-    entries.push(["discounts", fetchOneCData("discounts", endpoints.discounts, verbose)]);
+    entries.push([
+      "prices",
+      fetchOneCData("prices", endpoints.prices, verbose),
+    ]);
+    entries.push([
+      "discounts",
+      fetchOneCData("discounts", endpoints.discounts, verbose),
+    ]);
   }
   if (wantsStock) {
     entries.push(["stock", fetchOneCData("stock", endpoints.stock, verbose)]);
@@ -625,7 +679,10 @@ async function fetchOneCSnapshot(
       "alqitharaCosts",
       fetchOneCData("alqitharaCosts", endpoints.alqitharaCosts, verbose),
     ]);
-    entries.push(["localCosts", fetchOneCData("localCosts", endpoints.localCosts, verbose)]);
+    entries.push([
+      "localCosts",
+      fetchOneCData("localCosts", endpoints.localCosts, verbose),
+    ]);
   }
 
   const oneC: DiffInput["oneC"] = {
@@ -663,12 +720,21 @@ export function buildDiffReport(input: DiffInput): DiffReport {
   const costs = mergeCosts(input.oneC.alqitharaCosts, input.oneC.localCosts);
 
   const priceDifferences = wantsPrices
-    ? buildPriceDifferences(index.byBarcode, input.oneC.prices, input.oneC.discounts)
+    ? buildPriceDifferences(
+        index.byBarcode,
+        input.oneC.prices,
+        input.oneC.discounts,
+      )
     : [];
   const stockStatusDifferences = wantsStock
     ? buildStockStatusDifferences(input.products, input.oneC.stock)
     : [];
-  const costDifferences = wantsCosts ? buildCostDifferences(index.byBarcode, costs) : [];
+  const costDifferences = wantsCosts
+    ? buildCostDifferences(index.byBarcode, costs)
+    : [];
+  const oneCNonPositivePrices = wantsPrices
+    ? buildOneCNonPositivePrices(index.byBarcode, input.oneC.prices)
+    : [];
 
   const shopifyBarcodesMissingIn1cPrices = wantsPrices
     ? Array.from(index.byBarcode.keys())
@@ -684,9 +750,15 @@ export function buildDiffReport(input: DiffInput): DiffReport {
     : [];
 
   const oneCBarcodesMissingInShopify = {
-    prices: wantsPrices ? missingInShopify(input.oneC.prices, index.byBarcode) : [],
-    discounts: wantsPrices ? missingInShopify(input.oneC.discounts, index.byBarcode) : [],
-    stock: wantsStock ? missingInShopify(input.oneC.stock, index.byBarcode) : [],
+    prices: wantsPrices
+      ? missingInShopify(input.oneC.prices, index.byBarcode)
+      : [],
+    discounts: wantsPrices
+      ? missingInShopify(input.oneC.discounts, index.byBarcode)
+      : [],
+    stock: wantsStock
+      ? missingInShopify(input.oneC.stock, index.byBarcode)
+      : [],
     costs: wantsCosts
       ? Array.from(costs.keys())
           .filter((barcode) => !index.byBarcode.has(barcode))
@@ -716,6 +788,7 @@ export function buildDiffReport(input: DiffInput): DiffReport {
     blankShopifyBarcodeVariants: index.blankBarcodeVariants.length,
     duplicateShopifyBarcodeGroups: index.duplicateBarcodes.length,
     shopifyBarcodesMissingIn1cPrices: shopifyBarcodesMissingIn1cPrices.length,
+    oneCNonPositivePrices: oneCNonPositivePrices.length,
     discountBarcodesWithoutBasePrice: discountBarcodesWithoutBasePrice.length,
     oneCBarcodesMissingInShopify: oneCMissingTotal,
     truncatedShopifyProducts: truncatedShopifyProducts.length,
@@ -725,10 +798,11 @@ export function buildDiffReport(input: DiffInput): DiffReport {
       stockStatusDifferences.length +
       costDifferences.length +
       index.blankBarcodeVariants.length +
-      index.duplicateBarcodes.length +
+      // index.duplicateBarcodes.length +
       shopifyBarcodesMissingIn1cPrices.length +
+      oneCNonPositivePrices.length +
       discountBarcodesWithoutBasePrice.length +
-      oneCMissingTotal +
+      // oneCMissingTotal +
       truncatedShopifyProducts.length +
       invalidOneCValues.length,
   };
@@ -763,6 +837,7 @@ export function buildDiffReport(input: DiffInput): DiffReport {
       blankShopifyBarcodeVariants: index.blankBarcodeVariants,
       duplicateShopifyBarcodes: index.duplicateBarcodes,
       shopifyBarcodesMissingIn1cPrices,
+      oneCNonPositivePrices,
       discountBarcodesWithoutBasePrice,
       oneCBarcodesMissingInShopify,
       truncatedShopifyProducts,
@@ -839,14 +914,15 @@ function buildPriceDifferences(
   byBarcode.forEach((variants, barcode) => {
     const price = prices[barcode];
     if (price === undefined) return;
+    if (!isSyncableOneCPrice(price)) return;
 
     const discount = discounts[barcode];
     variants.forEach((variant) => {
       const weightedPrice = applyShopifyWeight(price, variant.weightKg);
       const priceStr = money(weightedPrice);
-      const hasValidDiscount = discount !== undefined && discount < price;
+      const hasValidDiscount = isSyncableOneCDiscount(discount, price);
       const expectedPrice = hasValidDiscount
-        ? money(applyShopifyWeight(discount, variant.weightKg))
+        ? money(applyShopifyWeight(Number(discount), variant.weightKg))
         : priceStr;
       const expectedCompareAtPrice = hasValidDiscount ? priceStr : null;
       const currentPrice = moneyOrNull(variant.price);
@@ -871,10 +947,40 @@ function buildPriceDifferences(
           },
           oneC: {
             price,
-            discount: hasValidDiscount ? discount : null,
+            discount: hasValidDiscount ? Number(discount) : null,
           },
         });
       }
+    });
+  });
+
+  return rows.sort(sortByBarcodeHandle);
+}
+
+function buildOneCNonPositivePrices(
+  byBarcode: Map<string, ShopifyVariantRef[]>,
+  prices: OneCValueMap,
+): OneCNonPositivePrice[] {
+  const rows: OneCNonPositivePrice[] = [];
+
+  byBarcode.forEach((variants, barcode) => {
+    const price = prices[barcode];
+    if (price === undefined || isSyncableOneCPrice(price)) return;
+
+    variants.forEach((variant) => {
+      rows.push({
+        barcode,
+        productHandle: variant.productHandle,
+        productId: variant.productId,
+        variantId: variant.variantId,
+        sku: variant.sku,
+        current: {
+          price: moneyOrNull(variant.price),
+          compareAtPrice: moneyOrNull(variant.compareAtPrice),
+        },
+        oneCPrice: price,
+        reason: "non_positive_price",
+      });
     });
   });
 
@@ -904,7 +1010,9 @@ function buildStockStatusDifferences(
       }
     });
 
-    const expectedStatus: "ACTIVE" | "DRAFT" = productInStock ? "ACTIVE" : "DRAFT";
+    const expectedStatus: "ACTIVE" | "DRAFT" = productInStock
+      ? "ACTIVE"
+      : "DRAFT";
     if (product.status !== expectedStatus) {
       rows.push({
         productHandle: product.handle,
@@ -979,7 +1087,9 @@ function missingInShopify(
     .sort();
 }
 
-function toMissingPriceRow(variant: ShopifyVariantRef): ShopifyBarcodeMissingPrice {
+function toMissingPriceRow(
+  variant: ShopifyVariantRef,
+): ShopifyBarcodeMissingPrice {
   return {
     barcode: variant.barcode,
     productHandle: variant.productHandle,
@@ -1009,7 +1119,10 @@ function sortByBarcodeHandle<
   );
 }
 
-export function buildOverview(report: DiffReport, manifest?: ReportFileManifest) {
+export function buildOverview(
+  report: DiffReport,
+  manifest?: ReportFileManifest,
+) {
   return {
     generatedAt: report.generatedAt,
     shopify: {
@@ -1038,7 +1151,9 @@ export function renderConsoleOverview(
 
   lines.push("Shopify test-store ↔ 1C diff overview");
   lines.push(`Generated: ${report.generatedAt}`);
-  lines.push(`Shopify: ${report.shopify.domain} (API ${report.shopify.apiVersion})`);
+  lines.push(
+    `Shopify: ${report.shopify.domain} (API ${report.shopify.apiVersion})`,
+  );
   lines.push(
     `Checked: products=${report.shopify.productCount}, variants=${report.shopify.variantCount}, uniqueBarcodes=${report.shopify.uniqueBarcodeCount}`,
   );
@@ -1047,16 +1162,33 @@ export function renderConsoleOverview(
   lines.push("");
   lines.push("Mismatches/data gaps:");
   lines.push(`  Price differences: ${report.summary.priceDifferences}`);
-  lines.push(`  Stock/status differences: ${report.summary.stockStatusDifferences}`);
+  lines.push(
+    `  Stock/status differences: ${report.summary.stockStatusDifferences}`,
+  );
   lines.push(`  Cost differences: ${report.summary.costDifferences}`);
-  lines.push(`  Blank Shopify barcodes: ${report.summary.blankShopifyBarcodeVariants}`);
-  lines.push(`  Duplicate Shopify barcode groups: ${report.summary.duplicateShopifyBarcodeGroups}`);
-  lines.push(`  Shopify barcodes missing in 1C prices: ${report.summary.shopifyBarcodesMissingIn1cPrices}`);
-  lines.push(`  1C barcodes missing in Shopify: ${report.summary.oneCBarcodesMissingInShopify}`);
-  lines.push(`  Discount barcodes without base price: ${report.summary.discountBarcodesWithoutBasePrice}`);
-  lines.push(`  Truncated Shopify products: ${report.summary.truncatedShopifyProducts}`);
+  lines.push(
+    `  Blank Shopify barcodes: ${report.summary.blankShopifyBarcodeVariants}`,
+  );
+  // lines.push(
+  //   `  Duplicate Shopify barcode groups: ${report.summary.duplicateShopifyBarcodeGroups}`,
+  // );
+  lines.push(
+    `  Shopify barcodes missing in 1C prices: ${report.summary.shopifyBarcodesMissingIn1cPrices}`,
+  );
+  lines.push(
+    `  1C non-positive prices skipped: ${report.summary.oneCNonPositivePrices}`,
+  );
+  // lines.push(`  1C barcodes missing in Shopify: ${report.summary.oneCBarcodesMissingInShopify}`);
+  lines.push(
+    `  Discount barcodes without base price: ${report.summary.discountBarcodesWithoutBasePrice}`,
+  );
+  lines.push(
+    `  Truncated Shopify products: ${report.summary.truncatedShopifyProducts}`,
+  );
   lines.push(`  Invalid 1C values: ${report.summary.invalidOneCValues}`);
-  lines.push(`  Total differences/data gaps: ${report.summary.totalDifferences}`);
+  lines.push(
+    `  Total differences/data gaps: ${report.summary.totalDifferences}`,
+  );
 
   return lines.join("\n");
 }
@@ -1105,7 +1237,12 @@ const costCsvHeaders = [
   "expectedCost",
   "source",
 ];
-const missingShopifyBarcodeCsvHeaders = ["productHandle", "productId", "variantId", "sku"];
+const missingShopifyBarcodeCsvHeaders = [
+  "productHandle",
+  "productId",
+  "variantId",
+  "sku",
+];
 const duplicateShopifyBarcodeCsvHeaders = [
   "barcode",
   "productHandle",
@@ -1119,6 +1256,17 @@ const shopifyBarcodeMissingPriceCsvHeaders = [
   "productId",
   "variantId",
   "sku",
+];
+const oneCNonPositivePriceCsvHeaders = [
+  "barcode",
+  "productHandle",
+  "productId",
+  "variantId",
+  "sku",
+  "currentPrice",
+  "currentCompareAtPrice",
+  "oneCPrice",
+  "reason",
 ];
 const barcodeCsvHeaders = ["barcode"];
 const truncatedProductCsvHeaders = ["productId", "productHandle", "note"];
@@ -1148,14 +1296,23 @@ function overviewRowsForCsv(report: DiffReport): CsvRow[] {
     { metric: "shopifyApiVersion", value: report.shopify.apiVersion },
     { metric: "shopifyProductCount", value: report.shopify.productCount },
     { metric: "shopifyVariantCount", value: report.shopify.variantCount },
-    { metric: "shopifyUniqueBarcodeCount", value: report.shopify.uniqueBarcodeCount },
+    {
+      metric: "shopifyUniqueBarcodeCount",
+      value: report.shopify.uniqueBarcodeCount,
+    },
     { metric: "modes", value: report.modes.join(",") },
     { metric: "oneCPricesCount", value: report.oneC.counts.prices },
     { metric: "oneCDiscountsCount", value: report.oneC.counts.discounts },
     { metric: "oneCStockCount", value: report.oneC.counts.stock },
-    { metric: "oneCAlqitharaCostsCount", value: report.oneC.counts.alqitharaCosts },
+    {
+      metric: "oneCAlqitharaCostsCount",
+      value: report.oneC.counts.alqitharaCosts,
+    },
     { metric: "oneCLocalCostsCount", value: report.oneC.counts.localCosts },
-    ...Object.entries(report.summary).map(([metric, value]) => ({ metric, value })),
+    ...Object.entries(report.summary).map(([metric, value]) => ({
+      metric,
+      value,
+    })),
   ];
 }
 
@@ -1199,7 +1356,9 @@ function costRowsForCsv(rows: CostDifference[]): CsvRow[] {
   }));
 }
 
-function missingShopifyBarcodeRowsForCsv(rows: MissingShopifyBarcode[]): CsvRow[] {
+function missingShopifyBarcodeRowsForCsv(
+  rows: MissingShopifyBarcode[],
+): CsvRow[] {
   return rows.map((row) => ({
     productHandle: row.productHandle,
     productId: row.productId,
@@ -1208,7 +1367,9 @@ function missingShopifyBarcodeRowsForCsv(rows: MissingShopifyBarcode[]): CsvRow[
   }));
 }
 
-function duplicateShopifyBarcodeRowsForCsv(rows: DuplicateShopifyBarcode[]): CsvRow[] {
+function duplicateShopifyBarcodeRowsForCsv(
+  rows: DuplicateShopifyBarcode[],
+): CsvRow[] {
   return rows.flatMap((row) =>
     row.variants.map((variant) => ({
       barcode: row.barcode,
@@ -1229,6 +1390,22 @@ function shopifyBarcodeMissingPriceRowsForCsv(
     productId: row.productId,
     variantId: row.variantId,
     sku: row.sku,
+  }));
+}
+
+function oneCNonPositivePriceRowsForCsv(
+  rows: OneCNonPositivePrice[],
+): CsvRow[] {
+  return rows.map((row) => ({
+    barcode: row.barcode,
+    productHandle: row.productHandle,
+    productId: row.productId,
+    variantId: row.variantId,
+    sku: row.sku,
+    currentPrice: row.current.price,
+    currentCompareAtPrice: row.current.compareAtPrice,
+    oneCPrice: row.oneCPrice,
+    reason: row.reason,
   }));
 }
 
@@ -1262,10 +1439,16 @@ function writeExcelWorkbook(filePath: string, sheets: ExcelSheet[]): void {
       data: Buffer.from(contentTypesXml(workbookSheets.length), "utf8"),
     },
     { name: "_rels/.rels", data: Buffer.from(rootRelationshipsXml(), "utf8") },
-    { name: "xl/workbook.xml", data: Buffer.from(workbookXml(workbookSheets), "utf8") },
+    {
+      name: "xl/workbook.xml",
+      data: Buffer.from(workbookXml(workbookSheets), "utf8"),
+    },
     {
       name: "xl/_rels/workbook.xml.rels",
-      data: Buffer.from(workbookRelationshipsXml(workbookSheets.length), "utf8"),
+      data: Buffer.from(
+        workbookRelationshipsXml(workbookSheets.length),
+        "utf8",
+      ),
     },
   ];
 
@@ -1283,7 +1466,8 @@ function toExcelWorkbookSheets(sheets: ExcelSheet[]): ExcelSheet[] {
   const used = new Set<string>();
 
   return sheets.map((sheet, index) => {
-    const baseName = normalizeExcelSheetName(sheet.name) || `Sheet ${index + 1}`;
+    const baseName =
+      normalizeExcelSheetName(sheet.name) || `Sheet ${index + 1}`;
     let name = baseName;
     let suffix = 2;
 
@@ -1372,7 +1556,9 @@ function worksheetXml(headers: string[], rows: CsvRow[]): string {
     .map((values, rowIndex) => {
       const rowNumber = rowIndex + 1;
       const cells = values
-        .map((value, columnIndex) => excelCellXml(value, columnIndex + 1, rowNumber))
+        .map((value, columnIndex) =>
+          excelCellXml(value, columnIndex + 1, rowNumber),
+        )
         .join("");
       return `<row r="${rowNumber}">${cells}</row>`;
     })
@@ -1385,7 +1571,11 @@ function worksheetXml(headers: string[], rows: CsvRow[]): string {
   );
 }
 
-function excelCellXml(value: CsvCell, columnNumber: number, rowNumber: number): string {
+function excelCellXml(
+  value: CsvCell,
+  columnNumber: number,
+  rowNumber: number,
+): string {
   const cellRef = `${excelColumnName(columnNumber)}${rowNumber}`;
   const text = value === null || value === undefined ? "" : String(value);
   const preserveSpace = /^\s|\s$/.test(text) ? ' xml:space="preserve"' : "";
@@ -1473,7 +1663,10 @@ function createStoredZip(entries: ZipEntry[]): Buffer {
   });
 
   const centralDirectoryOffset = offset;
-  const centralDirectorySize = centralParts.reduce((total, part) => total + part.length, 0);
+  const centralDirectorySize = centralParts.reduce(
+    (total, part) => total + part.length,
+    0,
+  );
   const endOfCentralDirectory = Buffer.alloc(22);
   endOfCentralDirectory.writeUInt32LE(0x06054b50, 0);
   endOfCentralDirectory.writeUInt16LE(0, 4);
@@ -1554,7 +1747,11 @@ export function writeReportFiles(
 
   writeJson("full-report.json", report);
   writeJson("price-differences.json", report.differences.prices);
-  writeCsv("price-differences.csv", priceCsvHeaders, priceRowsForCsv(report.differences.prices));
+  writeCsv(
+    "price-differences.csv",
+    priceCsvHeaders,
+    priceRowsForCsv(report.differences.prices),
+  );
   writeJson("stock-status-differences.json", report.differences.stockStatuses);
   writeCsv(
     "stock-status-differences.csv",
@@ -1562,14 +1759,26 @@ export function writeReportFiles(
     stockStatusRowsForCsv(report.differences.stockStatuses),
   );
   writeJson("cost-differences.json", report.differences.costs);
-  writeCsv("cost-differences.csv", costCsvHeaders, costRowsForCsv(report.differences.costs));
-  writeJson("blank-shopify-barcode-variants.json", report.dataGaps.blankShopifyBarcodeVariants);
+  writeCsv(
+    "cost-differences.csv",
+    costCsvHeaders,
+    costRowsForCsv(report.differences.costs),
+  );
+  writeJson(
+    "blank-shopify-barcode-variants.json",
+    report.dataGaps.blankShopifyBarcodeVariants,
+  );
   writeCsv(
     "blank-shopify-barcode-variants.csv",
     missingShopifyBarcodeCsvHeaders,
-    missingShopifyBarcodeRowsForCsv(report.dataGaps.blankShopifyBarcodeVariants),
+    missingShopifyBarcodeRowsForCsv(
+      report.dataGaps.blankShopifyBarcodeVariants,
+    ),
   );
-  writeJson("duplicate-shopify-barcodes.json", report.dataGaps.duplicateShopifyBarcodes);
+  writeJson(
+    "duplicate-shopify-barcodes.json",
+    report.dataGaps.duplicateShopifyBarcodes,
+  );
   writeCsv(
     "duplicate-shopify-barcodes.csv",
     duplicateShopifyBarcodeCsvHeaders,
@@ -1582,7 +1791,18 @@ export function writeReportFiles(
   writeCsv(
     "shopify-barcodes-missing-in-1c-prices.csv",
     shopifyBarcodeMissingPriceCsvHeaders,
-    shopifyBarcodeMissingPriceRowsForCsv(report.dataGaps.shopifyBarcodesMissingIn1cPrices),
+    shopifyBarcodeMissingPriceRowsForCsv(
+      report.dataGaps.shopifyBarcodesMissingIn1cPrices,
+    ),
+  );
+  writeJson(
+    "one-c-non-positive-prices.json",
+    report.dataGaps.oneCNonPositivePrices,
+  );
+  writeCsv(
+    "one-c-non-positive-prices.csv",
+    oneCNonPositivePriceCsvHeaders,
+    oneCNonPositivePriceRowsForCsv(report.dataGaps.oneCNonPositivePrices),
   );
   writeJson(
     "one-c-price-barcodes-missing-in-shopify.json",
@@ -1629,7 +1849,10 @@ export function writeReportFiles(
     barcodeCsvHeaders,
     barcodeRowsForCsv(report.dataGaps.discountBarcodesWithoutBasePrice),
   );
-  writeJson("truncated-shopify-products.json", report.dataGaps.truncatedShopifyProducts);
+  writeJson(
+    "truncated-shopify-products.json",
+    report.dataGaps.truncatedShopifyProducts,
+  );
   writeCsv(
     "truncated-shopify-products.csv",
     truncatedProductCsvHeaders,
@@ -1651,7 +1874,11 @@ export function writeReportFiles(
   writeJson("overview.json", buildOverview(report, manifest));
 
   const overviewTextPath = path.join(resolvedOutputDir, "overview.txt");
-  fs.writeFileSync(overviewTextPath, `${renderConsoleOverview(report, manifest)}\n`, "utf8");
+  fs.writeFileSync(
+    overviewTextPath,
+    `${renderConsoleOverview(report, manifest)}\n`,
+    "utf8",
+  );
   manifest.files.text["overview.txt"] = overviewTextPath;
 
   return manifest;
@@ -1666,7 +1893,10 @@ function toFileTimestamp(value: string): string {
   if (Number.isNaN(date.getTime())) {
     return value.replace(/[^a-zA-Z0-9_-]/g, "-");
   }
-  return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+  return date
+    .toISOString()
+    .replace(/[-:]/g, "")
+    .replace(/\.\d{3}Z$/, "Z");
 }
 
 async function main(): Promise<void> {
