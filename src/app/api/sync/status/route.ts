@@ -6,6 +6,7 @@ import {
   type SyncRun,
 } from "@/app/lib/sync-state";
 import { logSyncEvent } from "@/app/lib/sync-logging";
+import { sanitizeOperationalText } from "@/app/lib/sensitive-text";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,32 +22,6 @@ function isRunningSyncRun(run: SyncRun | null): boolean {
   return run ? RUNNING_STATUSES.has(run.status) : false;
 }
 
-function redactUrl(rawUrl: string): string {
-  try {
-    const url = new URL(rawUrl);
-    url.username = "";
-    url.password = "";
-    if (url.search) url.search = "?[redacted]";
-    return url.toString();
-  } catch {
-    return "[redacted-url]";
-  }
-}
-
-function sanitizeStatusText(value: string | null): string | null {
-  if (!value) return value;
-  return value
-    .slice(0, 2000)
-    .replace(/https?:\/\/[^\s"'<>)]*/gi, redactUrl)
-    .replace(/\bBasic\s+[A-Za-z0-9+/=._-]+/gi, "Basic [redacted]")
-    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
-    .replace(
-      /\b(authorization|x-api-key|x-shopify-access-token|token|password|secret)(["'\s:=]+)([^"',\s}]+)/gi,
-      "$1$2[redacted]",
-    )
-    .replace(/\b(shpat_|shpua_|sk_|rk_)[A-Za-z0-9_-]+/g, "$1[redacted]");
-}
-
 function toSyncRunStatusResponse(run: SyncRun) {
   return {
     runId: run.runId,
@@ -60,7 +35,7 @@ function toSyncRunStatusResponse(run: SyncRun) {
     proposedByMode: run.proposedByMode,
     appliedByMode: run.appliedByMode,
     skippedByMode: run.skippedByMode,
-    failureReason: sanitizeStatusText(run.failureReason),
+    failureReason: sanitizeOperationalText(run.failureReason),
     attempts: run.attempts,
     createdAt: run.createdAt,
     updatedAt: run.updatedAt,

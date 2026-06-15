@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { isAuthorizedCronRequest } from "@/app/lib/cron-auth";
-import { isSyncConfigError, reconcileSyncRuns } from "@/app/lib/sync";
+import { reconcileSyncRuns } from "@/app/lib/sync";
+import { reconcileSyncErrorResponse } from "@/app/lib/reconcile-sync-error-response";
 import { logSyncEvent } from "@/app/lib/sync-logging";
 
 export const runtime = "nodejs";
@@ -37,12 +38,6 @@ export async function GET(request: Request) {
       { durationMs: Date.now() - startedAt, error: message },
       "error",
     );
-    if (isSyncConfigError(error)) {
-      return NextResponse.json(
-        { ok: false, error: "redis_required", message },
-        { status: 503 },
-      );
-    }
-    return NextResponse.json({ ok: false, error: message }, { status: 500 });
+    return reconcileSyncErrorResponse(error);
   }
 }

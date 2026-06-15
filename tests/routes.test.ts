@@ -4,21 +4,43 @@ import { POST as triggerPost } from "../src/app/api/sync/trigger/route";
 import { GET as statusGet } from "../src/app/api/sync/status/route";
 import { GET as cronGet } from "../src/app/api/cron/daily-sync/route";
 import { GET as reconcileCronGet } from "../src/app/api/cron/reconcile-sync/route";
+import { reconcileSyncErrorResponse } from "../src/app/lib/reconcile-sync-error-response";
+import {
+  __resetQstashSyncForTests,
+  __setSyncContinuationPublisherForTests,
+  SyncContinuationConfigError,
+  type SyncContinuationPublishRequest,
+} from "../src/app/lib/qstash-sync";
 import {
   __resetMemorySyncStateForTests,
   createSyncRun,
   getSyncRun,
+  listSyncRuns,
   saveSyncRun,
 } from "../src/app/lib/sync-state";
+
+let publishedContinuations: SyncContinuationPublishRequest[] = [];
 
 beforeEach(() => {
   delete process.env.REDIS_URL;
   delete process.env.VERCEL_ENV;
   delete process.env.CRON_SECRET;
+  delete process.env.QSTASH_TOKEN;
+  delete process.env.QSTASH_URL;
   Object.assign(process.env, { NODE_ENV: "test" });
   process.env.DISABLE_SYNC_KICKOFF = "1";
   process.env.INTERNAL_API_KEY = "secret";
+  process.env.SYNC_CONTINUATION_BASE_URL = "https://sync.example.test";
   __resetMemorySyncStateForTests();
+  __resetQstashSyncForTests();
+  publishedContinuations = [];
+  __setSyncContinuationPublisherForTests(async (request) => {
+    publishedContinuations.push(request);
+    return {
+      messageId: `msg_${publishedContinuations.length}`,
+      url: request.url,
+    };
+  });
 });
 
 test("manual sync trigger quick-acks accepted run", async () => {
@@ -27,7 +49,7 @@ test("manual sync trigger quick-acks accepted run", async () => {
       method: "POST",
       headers: { "x-api-key": "secret", "content-type": "application/json" },
       body: JSON.stringify({ modes: ["stock", "prices"] }),
-    })
+    }),
   );
   const body = await response.json();
 
@@ -36,6 +58,10 @@ test("manual sync trigger quick-acks accepted run", async () => {
   assert.equal(body.accepted, true);
   assert.deepEqual(body.modes, ["prices", "stock"]);
   assert.ok(body.runId);
+  assert.equal(publishedContinuations.length, 1);
+  assert.equal(publishedContinuations[0].body.kind, "continue-run");
+  assert.equal(publishedContinuations[0].body.source, "manual");
+  assert.equal(publishedContinuations[0].body.runId, body.runId);
 });
 
 test("sync status endpoint rejects missing API key", async () => {
@@ -210,7 +236,10 @@ test("sync status endpoint redacts sensitive failure details", async () => {
 
   assert.equal(response.status, 200);
   assert.match(body.run.failureReason, /example\.test\/path/);
-  assert.doesNotMatch(body.run.failureReason, /user:pass|abc123|secret|shpat_12345/);
+  assert.doesNotMatch(
+    body.run.failureReason,
+    /user:pass|abc123|secret|shpat_12345/,
+  );
   assert.match(body.run.failureReason, /\[redacted\]/);
 });
 
@@ -234,13 +263,16 @@ test("daily cron quick-acks accepted run", async () => {
   const response = await cronGet(
     new Request("https://example.test/api/cron/daily-sync", {
       headers: { "x-api-key": "secret" },
-    })
+    }),
   );
   const body = await response.json();
 
   assert.equal(response.status, 202);
   assert.equal(body.ok, true);
   assert.deepEqual(body.modes, ["prices", "stock"]);
+  assert.equal(publishedContinuations.length, 1);
+  assert.equal(publishedContinuations[0].body.kind, "continue-run");
+  assert.equal(publishedContinuations[0].body.source, "cron");
 });
 
 test("production daily cron accepts Vercel CRON_SECRET bearer auth before sync config checks", async () => {
@@ -250,13 +282,38 @@ test("production daily cron accepts Vercel CRON_SECRET bearer auth before sync c
   const response = await cronGet(
     new Request("https://example.test/api/cron/daily-sync", {
       headers: { authorization: "Bearer cron-secret" },
-    })
+    }),
   );
   const body = await response.json();
 
   assert.equal(response.status, 503);
   assert.equal(body.ok, false);
   assert.equal(body.error, "redis_required");
+});
+
+test("manual sync enqueue failure marks accepted run failed instead of stranding queued", async () => {
+  __setSyncContinuationPublisherForTests(async () => {
+    throw new Error("qstash unavailable");
+  });
+
+  const response = await triggerPost(
+    new Request("https://example.test/api/sync/trigger", {
+      method: "POST",
+      headers: { "x-api-key": "secret", "content-type": "application/json" },
+      body: JSON.stringify({ modes: ["stock"] }),
+    }),
+  );
+  const body = await response.json();
+  const runs = await listSyncRuns();
+
+  assert.equal(response.status, 500);
+  assert.equal(body.ok, false);
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].status, "failed");
+  assert.match(
+    runs[0].failureReason ?? "",
+    /Failed to enqueue durable manual sync continuation: qstash unavailable/,
+  );
 });
 
 test("production cron rejects legacy cron header when CRON_SECRET is configured", async () => {
@@ -266,7 +323,7 @@ test("production cron rejects legacy cron header when CRON_SECRET is configured"
   const response = await cronGet(
     new Request("https://example.test/api/cron/daily-sync", {
       headers: { "x-vercel-cron": "1" },
-    })
+    }),
   );
   const body = await response.json();
 
@@ -281,11 +338,28 @@ test("production reconcile cron accepts Vercel CRON_SECRET bearer auth before sy
   const response = await reconcileCronGet(
     new Request("https://example.test/api/cron/reconcile-sync", {
       headers: { authorization: "Bearer cron-secret" },
-    })
+    }),
   );
   const body = await response.json();
 
   assert.equal(response.status, 503);
   assert.equal(body.ok, false);
   assert.equal(body.error, "redis_required");
+});
+
+test("reconcile cron reports QStash config separately from Redis", async () => {
+  const response = reconcileSyncErrorResponse(
+    new SyncContinuationConfigError(
+      "Missing QStash sync continuation config: QSTASH_TOKEN",
+    ),
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 503);
+  assert.equal(body.ok, false);
+  assert.equal(body.error, "sync_config_required");
+  assert.equal(
+    body.message,
+    "Missing QStash sync continuation config: QSTASH_TOKEN",
+  );
 });

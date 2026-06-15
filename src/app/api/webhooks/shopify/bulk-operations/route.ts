@@ -1,11 +1,15 @@
 import { NextResponse } from "next/server";
-import { handleBulkOperationFinished } from "@/app/lib/sync";
 import {
+  getWebhookIdempotencyValue,
   parseBulkOperationWebhook,
   recordWebhookIdempotency,
   verifyShopifyWebhookHmac,
 } from "@/app/lib/shopify-webhooks";
 import { logSyncEvent } from "@/app/lib/sync-logging";
+import {
+  enqueueSyncContinuation,
+  isSyncContinuationConfigError,
+} from "@/app/lib/qstash-sync";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -74,48 +78,79 @@ export async function POST(request: Request) {
     );
   }
 
-  const firstDelivery = await recordWebhookIdempotency({
+  const existingDelivery = await getWebhookIdempotencyValue({
     topic,
     operationId: opId,
     status,
   });
-  if (!firstDelivery) {
+  if (existingDelivery) {
     logSyncEvent("shopify_bulk_webhook_duplicate", {
       topic,
       opId,
       opStatus: status,
+      qstashCorrelationId: existingDelivery,
       durationMs: Date.now() - startedAt,
     });
     return NextResponse.json({ ok: true, duplicate: true });
   }
 
-  setTimeout(() => {
-    handleBulkOperationFinished({
+  let enqueueResult;
+  try {
+    enqueueResult = await enqueueSyncContinuation({
+      kind: "bulk-finish",
       opId,
       status,
       errorCode: payload.error_code ?? null,
       source: "shopify-webhook",
-    }).catch((error) => {
-      logSyncEvent(
-        "shopify_bulk_webhook_continuation_failed",
-        {
-          opId,
-          opStatus: status,
-          error: error?.message ?? String(error),
-        },
-        "error",
-      );
     });
-  }, 0);
+  } catch (error: any) {
+    const message = error?.message ?? String(error);
+    logSyncEvent(
+      "shopify_bulk_webhook_enqueue_failed",
+      {
+        topic,
+        opId,
+        opStatus: status,
+        error: message,
+        durationMs: Date.now() - startedAt,
+      },
+      "error",
+    );
+    return NextResponse.json(
+      {
+        ok: false,
+        error: isSyncContinuationConfigError(error)
+          ? "sync_config_required"
+          : "qstash_enqueue_failed",
+        message,
+      },
+      { status: isSyncContinuationConfigError(error) ? 503 : 500 },
+    );
+  }
+
+  const firstDelivery = await recordWebhookIdempotency({
+    topic,
+    operationId: opId,
+    status,
+    value: enqueueResult.correlationId,
+  });
 
   const durationMs = Date.now() - startedAt;
-  logSyncEvent("shopify_bulk_webhook_recorded", {
+  logSyncEvent("shopify_bulk_webhook_enqueued", {
     topic,
     opId,
     opStatus: status,
     errorCode: payload.error_code ?? null,
     durationMs,
-    continuationScheduled: true,
+    firstDelivery,
+    qstashCorrelationId: enqueueResult.correlationId,
+    qstashMessageId: enqueueResult.messageId,
+    qstashDeduplicationId: enqueueResult.deduplicationId,
+    qstashDeduplicated: enqueueResult.deduplicated,
   });
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({
+    ok: true,
+    duplicate: !firstDelivery,
+    qstashMessageId: enqueueResult.messageId,
+  });
 }

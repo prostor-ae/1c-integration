@@ -2,11 +2,12 @@ import {
   fetchAllShopifyProductsAndVariants,
   fetchAllShopifyVariants,
   assertNoActiveBulkOperation,
-  getBulkOperationById,
+  getBulkOperationById as fetchBulkOperationById,
   pollBulkOperation,
   runCostUpdateBulkMutation,
   runPriceUpdateBulkMutation,
   runStatusUpdateBulkMutation,
+  type ShopifyBulkOperationStatus,
   type ShopifyProductInfo,
 } from "./shopify-client";
 import {
@@ -31,25 +32,43 @@ import {
   type SyncResult,
 } from "./sync-types";
 import {
+  acquireSyncLock,
   createSyncRun,
+  getPendingNextContinuation,
   getRunIdForOperation,
   getSyncRun,
   isMissingRedisConfig,
   listOpenRuns,
+  markPendingNextContinuationEnqueued,
+  releaseSyncLock,
+  savePendingNextContinuation,
   saveSyncRun,
   withSyncLock,
   type AcceptedRun,
+  type PendingNextContinuation,
   type SyncRun,
 } from "./sync-state";
 import { logSyncEvent, summarizeSyncRun } from "./sync-logging";
 import { applyShopifyWeight } from "./product-weight";
 import { isSyncableOneCDiscount, isSyncableOneCPrice } from "./one-c-values";
+import {
+  enqueueSyncContinuation,
+  isSyncContinuationConfigError,
+  type EnqueueSyncContinuationResult,
+  type SyncContinuationPayload,
+} from "./qstash-sync";
 
 export type { ModeResult, SyncMode, SyncResult } from "./sync-types";
 
 const DRAFT_FLIP_THRESHOLD = 0.2;
 const MUTATION_STALE_MS = 4 * 60 * 60 * 1000;
 const QUERY_STALE_MS = 24 * 60 * 60 * 1000;
+
+type BulkOperationLookup = (
+  id: string,
+) => Promise<ShopifyBulkOperationStatus | null>;
+
+let bulkOperationLookupOverride: BulkOperationLookup | null = null;
 
 type PriorBulkOpActivePayload = {
   error: "prior_bulk_op_active";
@@ -96,6 +115,19 @@ function currentMode(run: SyncRun): SyncMode | null {
   return run.requestedModes[run.currentIndex] ?? null;
 }
 
+async function getBulkOperationById(
+  id: string,
+): Promise<ShopifyBulkOperationStatus | null> {
+  const lookup = bulkOperationLookupOverride ?? fetchBulkOperationById;
+  return await lookup(id);
+}
+
+export function __setBulkOperationByIdForTests(
+  lookup: BulkOperationLookup | null,
+): void {
+  bulkOperationLookupOverride = lookup;
+}
+
 function advanceRun(run: SyncRun) {
   run.currentIndex += 1;
   run.currentMode = currentMode(run);
@@ -138,32 +170,89 @@ export async function acceptSyncRun({
   return accepted;
 }
 
-export function kickOffSyncRun(runId: string): void {
-  if (process.env.DISABLE_SYNC_KICKOFF === "1") {
-    logSyncEvent("sync_kickoff_disabled", { runId });
-    return;
-  }
-  logSyncEvent("sync_kickoff_scheduled", { runId });
-  setTimeout(() => {
-    logSyncEvent("sync_kickoff_started", { runId });
-    continueSyncRun(runId, "kickoff").catch((error) => {
-      logSyncEvent(
-        "sync_kickoff_failed",
-        {
-          runId,
-          error: error?.message ?? String(error),
-        },
-        "error",
-      );
-    });
-  }, 0);
-}
-
 type ContinuationSource =
   | "direct"
-  | "kickoff"
+  | "cron"
+  | "manual"
+  | "bulk-finish"
   | "reconciler"
   | "shopify-webhook";
+
+export async function enqueueSyncRunContinuation({
+  runId,
+  source,
+}: {
+  runId: string;
+  source: "cron" | "manual" | "bulk-finish" | "reconciler";
+}): Promise<EnqueueSyncContinuationResult> {
+  const run = await getSyncRun(runId);
+  if (!run) {
+    throw new Error(`sync run not found for continuation enqueue: ${runId}`);
+  }
+  const payload: SyncContinuationPayload = {
+    kind: "continue-run",
+    runId,
+    source,
+    currentIndex: run.currentIndex,
+    currentMode: run.currentMode,
+    runVersion: run.version,
+  };
+  const result = await enqueueSyncContinuation(payload);
+  logSyncEvent("sync_continuation_enqueued", {
+    runId,
+    source,
+    currentIndex: run.currentIndex,
+    currentMode: run.currentMode,
+    runVersion: run.version,
+    qstashMessageId: result.messageId,
+    qstashCorrelationId: result.correlationId,
+    qstashDeduplicationId: result.deduplicationId,
+    qstashDeduplicated: result.deduplicated,
+  });
+  return result;
+}
+
+export async function markSyncRunFailed({
+  runId,
+  mode,
+  reason,
+}: {
+  runId: string;
+  mode?: string | null;
+  reason: string;
+}): Promise<void> {
+  const run = await getSyncRun(runId);
+  const failureMode = mode ?? run?.currentMode ?? "unknown";
+  let shouldAlert = true;
+
+  if (run) {
+    shouldAlert = run.status !== "failed" || run.failureReason !== reason;
+    run.status = "failed";
+    run.failureReason = reason;
+    run.activeBulkOperationId = null;
+    run.activeBulkOperationType = null;
+    await saveSyncRun(run);
+    logSyncEvent(
+      "sync_run_marked_failed",
+      {
+        reason,
+        failureMode,
+        ...summarizeSyncRun(run),
+      },
+      "error",
+    );
+  } else {
+    logSyncEvent(
+      "sync_run_mark_failed_missing",
+      { runId, failureMode, reason },
+      "error",
+    );
+  }
+
+  if (shouldAlert) {
+    await sendSyncFailureAlert({ runId, mode: failureMode, reason });
+  }
+}
 
 export async function continueSyncRun(
   runId: string,
@@ -483,10 +572,7 @@ async function startPricesModeStep(): Promise<ModeStepOutcome> {
       const price = applyShopifyWeight(Number(priceRaw), product.weightKg);
       const priceStr = Number(price).toFixed(2);
       const discountRaw = discounts1c[variant.barcode];
-      const hasValidDiscount = isSyncableOneCDiscount(
-        discountRaw,
-        priceRaw,
-      );
+      const hasValidDiscount = isSyncableOneCDiscount(discountRaw, priceRaw);
       const newPrice = hasValidDiscount
         ? Number(
             applyShopifyWeight(Number(discountRaw), product.weightKg),
@@ -658,6 +744,100 @@ async function startStockModeStep(): Promise<ModeStepOutcome> {
   return { kind: "waiting_bulk", op, proposed: updates.length };
 }
 
+export type BulkOperationFinishResult = {
+  run: SyncRun | null;
+  needsContinuation: boolean;
+  completedOpId?: string;
+  nextContinuationPayload?: SyncContinuationPayload;
+};
+
+export async function enqueueBulkFinishNextContinuation(
+  result: BulkOperationFinishResult,
+): Promise<EnqueueSyncContinuationResult | null> {
+  if (
+    !result.needsContinuation ||
+    !result.nextContinuationPayload ||
+    !result.completedOpId
+  ) {
+    return null;
+  }
+
+  const nextMessage = await enqueueSyncContinuation(result.nextContinuationPayload);
+  await markPendingNextContinuationEnqueued({
+    opId: result.completedOpId,
+    qstashCorrelationId: nextMessage.correlationId,
+    qstashMessageId: nextMessage.messageId,
+  });
+  logSyncEvent("qstash_bulk_finish_next_enqueued", {
+    opId: result.completedOpId,
+    runId: result.run?.runId,
+    qstashCorrelationId: nextMessage.correlationId,
+    qstashMessageId: nextMessage.messageId,
+    qstashDeduplicationId: nextMessage.deduplicationId,
+    qstashDeduplicated: nextMessage.deduplicated,
+  });
+  return nextMessage;
+}
+
+function noBulkFinishContinuation(
+  run: SyncRun | null,
+): BulkOperationFinishResult {
+  return { run, needsContinuation: false };
+}
+
+function nextPayloadFromRun(
+  run: SyncRun,
+  source: "bulk-finish",
+): SyncContinuationPayload {
+  return {
+    kind: "continue-run",
+    runId: run.runId,
+    source,
+    currentIndex: run.currentIndex,
+    currentMode: run.currentMode,
+    runVersion: run.version,
+  };
+}
+
+function nextPayloadFromPending(
+  pending: PendingNextContinuation,
+): SyncContinuationPayload {
+  return {
+    kind: "continue-run",
+    runId: pending.runId,
+    source: "bulk-finish",
+    currentIndex: pending.currentIndex,
+    currentMode: pending.currentMode,
+    runVersion: pending.runVersion,
+  };
+}
+
+async function recordPendingNextModeContinuation({
+  opId,
+  run,
+  nextIndex,
+  nextMode,
+}: {
+  opId: string;
+  run: SyncRun;
+  nextIndex: number;
+  nextMode: SyncMode;
+}): Promise<void> {
+  const now = new Date().toISOString();
+  await savePendingNextContinuation({
+    opId,
+    runId: run.runId,
+    currentIndex: nextIndex,
+    currentMode: nextMode,
+    runVersion: run.version + 1,
+    state: "pending",
+    createdAt: now,
+    updatedAt: now,
+    qstashCorrelationId: null,
+    qstashMessageId: null,
+  });
+}
+
 export async function handleBulkOperationFinished({
   opId,
   status,
@@ -668,7 +848,7 @@ export async function handleBulkOperationFinished({
   status: string;
   errorCode: string | null;
   source?: "direct" | "shopify-webhook" | "reconciler";
-}): Promise<SyncRun | null> {
+}): Promise<BulkOperationFinishResult> {
   logSyncEvent("sync_bulk_finish_received", {
     completionSource: source,
     opId,
@@ -682,10 +862,20 @@ export async function handleBulkOperationFinished({
       { completionSource: source, opId, opStatus: status },
       "warn",
     );
-    return null;
+    return noBulkFinishContinuation(null);
   }
 
-  return await withSyncLock(async (fencingToken) => {
+  const fencingToken = await acquireSyncLock();
+  if (!fencingToken) {
+    logSyncEvent(
+      "sync_bulk_finish_lock_busy",
+      { completionSource: source, runId, opId, opStatus: status },
+      "warn",
+    );
+    throw new Error(`sync bulk-finish lock busy for operation ${opId}`);
+  }
+
+  try {
     const run = await getSyncRun(runId);
     if (!run) {
       logSyncEvent(
@@ -693,17 +883,41 @@ export async function handleBulkOperationFinished({
         { completionSource: source, runId, opId, opStatus: status },
         "warn",
       );
-      return null;
+      return noBulkFinishContinuation(null);
     }
     if (run.activeBulkOperationId !== opId) {
+      const pending = await getPendingNextContinuation(opId);
+      if (
+        pending?.state === "pending" &&
+        pending.runId === run.runId &&
+        run.status === "queued" &&
+        run.currentIndex === pending.currentIndex &&
+        run.currentMode === pending.currentMode
+      ) {
+        logSyncEvent("sync_bulk_finish_pending_next_recovered", {
+          completionSource: source,
+          opId,
+          opStatus: status,
+          pendingCurrentIndex: pending.currentIndex,
+          pendingCurrentMode: pending.currentMode,
+          ...summarizeSyncRun(run),
+        });
+        return {
+          run,
+          needsContinuation: true,
+          completedOpId: opId,
+          nextContinuationPayload: nextPayloadFromPending(pending),
+        };
+      }
       logSyncEvent("sync_bulk_finish_ignored", {
         completionSource: source,
         reason: "operation_is_not_active_for_run",
+        pendingNextState: pending?.state,
         opId,
         opStatus: status,
         ...summarizeSyncRun(run),
       });
-      return run;
+      return noBulkFinishContinuation(run);
     }
     if (run.status !== "waiting_bulk") {
       logSyncEvent("sync_bulk_finish_ignored", {
@@ -713,7 +927,7 @@ export async function handleBulkOperationFinished({
         opStatus: status,
         ...summarizeSyncRun(run),
       });
-      return run;
+      return noBulkFinishContinuation(run);
     }
 
     const mode = run.currentMode;
@@ -725,13 +939,23 @@ export async function handleBulkOperationFinished({
         opStatus: status,
         ...summarizeSyncRun(run),
       });
-      return run;
+      return noBulkFinishContinuation(run);
     }
 
     const normalizedStatus = status.toUpperCase();
 
     if (normalizedStatus === "COMPLETED") {
       const proposed = run.proposedByMode[mode] ?? 0;
+      const nextIndex = run.currentIndex + 1;
+      const nextMode = run.requestedModes[nextIndex] ?? null;
+      if (nextMode) {
+        await recordPendingNextModeContinuation({
+          opId,
+          run,
+          nextIndex,
+          nextMode,
+        });
+      }
       recordModeResult(run, mode, { proposed, applied: proposed });
       advanceRun(run);
       await saveSyncRun(run, fencingToken);
@@ -746,7 +970,12 @@ export async function handleBulkOperationFinished({
         ...summarizeSyncRun(run),
       });
       if (run.currentMode) {
-        kickOffSyncRun(run.runId);
+        return {
+          run,
+          needsContinuation: true,
+          completedOpId: opId,
+          nextContinuationPayload: nextPayloadFromRun(run, "bulk-finish"),
+        };
       } else {
         logSyncEvent("sync_run_completed", {
           completionSource: source,
@@ -754,7 +983,7 @@ export async function handleBulkOperationFinished({
         });
         await sendSyncSuccessAlert({ run });
       }
-      return run;
+      return noBulkFinishContinuation(run);
     }
 
     if (
@@ -780,7 +1009,7 @@ export async function handleBulkOperationFinished({
         "error",
       );
       await sendSyncFailureAlert({ runId: run.runId, mode, reason });
-      return run;
+      return noBulkFinishContinuation(run);
     }
 
     logSyncEvent("sync_bulk_operation_not_terminal", {
@@ -790,8 +1019,10 @@ export async function handleBulkOperationFinished({
       opStatus: normalizedStatus,
       ...summarizeSyncRun(run),
     });
-    return run;
-  });
+    return noBulkFinishContinuation(run);
+  } finally {
+    await releaseSyncLock(fencingToken);
+  }
 }
 
 export async function reconcileSyncRuns(): Promise<{
@@ -847,12 +1078,25 @@ export async function reconcileSyncRuns(): Promise<{
         op.status.toUpperCase(),
       )
     ) {
-      await handleBulkOperationFinished({
+      const finishResult = await handleBulkOperationFinished({
         opId: run.activeBulkOperationId,
         status: op.status,
         errorCode: op.errorCode,
         source: "reconciler",
       });
+      try {
+        await enqueueBulkFinishNextContinuation(finishResult);
+      } catch (error: any) {
+        const message = error?.message ?? String(error);
+        if (finishResult.run?.runId) {
+          await markSyncRunFailed({
+            runId: finishResult.run.runId,
+            mode: finishResult.run.currentMode,
+            reason: `Failed to enqueue next sync continuation after reconciled bulk operation ${finishResult.completedOpId ?? op.id}: ${message}`,
+          });
+        }
+        throw error;
+      }
       changed += 1;
       continue;
     }
@@ -945,5 +1189,5 @@ export async function runSync({
 }
 
 export function isSyncConfigError(error: unknown): boolean {
-  return isMissingRedisConfig(error);
+  return isMissingRedisConfig(error) || isSyncContinuationConfigError(error);
 }

@@ -2,9 +2,11 @@ import { NextResponse } from "next/server";
 import { isAuthorizedCronRequest } from "@/app/lib/cron-auth";
 import {
   acceptSyncRun,
+  enqueueSyncRunContinuation,
   isSyncConfigError,
-  kickOffSyncRun,
+  markSyncRunFailed,
 } from "@/app/lib/sync";
+import { isMissingRedisConfig } from "@/app/lib/sync-state";
 import { logSyncEvent } from "@/app/lib/sync-logging";
 
 export const runtime = "nodejs";
@@ -27,26 +29,48 @@ export async function GET(request: Request) {
   }
 
   const startedAt = Date.now();
+  let acceptedRunId: string | null = null;
+  let acceptedMode: string | null = null;
   try {
     const accepted = await acceptSyncRun({
       modes: ["stock", "prices"],
       source: "cron",
     });
-    if (accepted.accepted) kickOffSyncRun(accepted.runId);
+    if (accepted.accepted) {
+      acceptedRunId = accepted.runId;
+      acceptedMode = accepted.currentMode;
+      await enqueueSyncRunContinuation({
+        runId: accepted.runId,
+        source: "cron",
+      });
+    }
     const durationMs = Date.now() - startedAt;
     logSyncEvent("cron_sync_accepted", { durationMs, accepted });
     return NextResponse.json({ ok: true, ...accepted }, { status: 202 });
   } catch (error: any) {
     const durationMs = Date.now() - startedAt;
     const message = error?.message ?? String(error);
+    if (acceptedRunId) {
+      await markSyncRunFailed({
+        runId: acceptedRunId,
+        mode: acceptedMode,
+        reason: `Failed to enqueue durable cron sync continuation: ${message}`,
+      });
+    }
     logSyncEvent(
       "cron_sync_accept_failed",
-      { durationMs, error: message },
+      { durationMs, acceptedRunId, error: message },
       "error",
     );
-    if (isSyncConfigError(error)) {
+    if (isMissingRedisConfig(error)) {
       return NextResponse.json(
         { ok: false, error: "redis_required", message },
+        { status: 503 },
+      );
+    }
+    if (isSyncConfigError(error)) {
+      return NextResponse.json(
+        { ok: false, error: "sync_config_required", message },
         { status: 503 },
       );
     }

@@ -1,7 +1,11 @@
 import { createClient, type RedisClientType } from "redis";
 import { randomUUID } from "crypto";
 import { getRedisConfig, getStoreId } from "./config";
-import { canonicalizeModes, type ModeResult, type SyncMode } from "./sync-types";
+import {
+  canonicalizeModes,
+  type ModeResult,
+  type SyncMode,
+} from "./sync-types";
 
 export type SyncRunStatus =
   | "queued"
@@ -43,6 +47,31 @@ export type AcceptedRun = {
   currentMode: SyncMode | null;
 };
 
+export type QstashContinuationRecord = {
+  correlationId: string;
+  payload: unknown;
+  deduplicationId: string;
+  destinationUrl: string;
+  failureCallbackUrl: string;
+  createdAt: string;
+  publishedAt: string | null;
+  messageId: string | null;
+  status: "publishing" | "published";
+};
+
+export type PendingNextContinuation = {
+  opId: string;
+  runId: string;
+  currentIndex: number;
+  currentMode: SyncMode;
+  runVersion: number;
+  state: "pending" | "enqueued";
+  createdAt: string;
+  updatedAt: string;
+  qstashCorrelationId: string | null;
+  qstashMessageId: string | null;
+};
+
 const RUN_TTL_SECONDS = 14 * 24 * 60 * 60;
 const IDEMPOTENCY_TTL_SECONDS = 7 * 24 * 60 * 60;
 const LOCK_TTL_MS = 5 * 60 * 1000;
@@ -54,6 +83,12 @@ const memoryRuns = new Map<string, SyncRun>();
 const memoryOpIndex = new Map<string, string>();
 const memoryIdempotency = new Map<string, string>();
 const memoryLatestRunByStore = new Map<string, string>();
+const memoryQstashContinuations = new Map<string, QstashContinuationRecord>();
+const memoryQstashMessages = new Map<string, string>();
+const memoryPendingNextContinuations = new Map<
+  string,
+  PendingNextContinuation
+>();
 let memoryLock: { token: string; expiresAt: number } | null = null;
 
 class MissingRedisConfigError extends Error {
@@ -95,6 +130,18 @@ function idempotencyKey(key: string) {
   return `sync:idempotency:${key}`;
 }
 
+function qstashContinuationKey(correlationId: string) {
+  return `sync:qstash:continuation:${correlationId}`;
+}
+
+function qstashMessageKey(messageId: string) {
+  return `sync:qstash:message:${messageId}`;
+}
+
+function pendingNextKey(opId: string) {
+  return `sync:next-continuation:${opId}`;
+}
+
 function timeValue(value: string | null): number {
   if (!value) return 0;
   const parsed = Date.parse(value);
@@ -126,7 +173,10 @@ async function getRedis(): Promise<RedisClientType | null> {
     redisClient = createClient({ url: config.url });
     redisClient.on("error", (error) => {
       console.error(
-        JSON.stringify({ event: "redis_error", error: error?.message ?? String(error) })
+        JSON.stringify({
+          event: "redis_error",
+          error: error?.message ?? String(error),
+        }),
       );
     });
   }
@@ -136,10 +186,15 @@ async function getRedis(): Promise<RedisClientType | null> {
 
 async function saveMemoryRun(run: SyncRun) {
   memoryRuns.set(run.runId, run);
-  if (run.activeBulkOperationId) memoryOpIndex.set(run.activeBulkOperationId, run.runId);
+  if (run.activeBulkOperationId)
+    memoryOpIndex.set(run.activeBulkOperationId, run.runId);
   const latestRunId = memoryLatestRunByStore.get(run.storeId);
   const latestRun = latestRunId ? memoryRuns.get(latestRunId) : null;
-  if (!latestRun || latestRun.runId === run.runId || newestFirst(run, latestRun) < 0) {
+  if (
+    !latestRun ||
+    latestRun.runId === run.runId ||
+    newestFirst(run, latestRun) < 0
+  ) {
     memoryLatestRunByStore.set(run.storeId, run.runId);
   }
   if (isOpenRun(run)) {
@@ -204,7 +259,9 @@ export async function createSyncRun({
   if (!redis) {
     await saveMemoryRun(run);
   } else {
-    await redis.set(runKey(run.runId), JSON.stringify(run), { EX: RUN_TTL_SECONDS });
+    await redis.set(runKey(run.runId), JSON.stringify(run), {
+      EX: RUN_TTL_SECONDS,
+    });
     await redis.set(activeKey(storeId), run.runId, { EX: RUN_TTL_SECONDS });
     await redis.set(latestKey(storeId), run.runId, { EX: RUN_TTL_SECONDS });
   }
@@ -226,13 +283,18 @@ export async function getSyncRun(runId: string): Promise<SyncRun | null> {
   return JSON.parse(raw) as SyncRun;
 }
 
-export async function getRunIdForOperation(opId: string): Promise<string | null> {
+export async function getRunIdForOperation(
+  opId: string,
+): Promise<string | null> {
   const redis = await getRedis();
   if (!redis) return memoryOpIndex.get(opId) ?? null;
   return await redis.get(opKey(opId));
 }
 
-export async function saveSyncRun(run: SyncRun, fencingToken?: string): Promise<void> {
+export async function saveSyncRun(
+  run: SyncRun,
+  fencingToken?: string,
+): Promise<void> {
   const redis = await getRedis();
   const existing = await getSyncRun(run.runId);
   if (existing && existing.version > run.version) {
@@ -248,13 +310,17 @@ export async function saveSyncRun(run: SyncRun, fencingToken?: string): Promise<
     await saveMemoryRun(run);
     return;
   }
-  await redis.set(runKey(run.runId), JSON.stringify(run), { EX: RUN_TTL_SECONDS });
+  await redis.set(runKey(run.runId), JSON.stringify(run), {
+    EX: RUN_TTL_SECONDS,
+  });
   const latestRunId = await redis.get(latestKey(run.storeId));
   if (!latestRunId || latestRunId === run.runId) {
     await redis.set(latestKey(run.storeId), run.runId, { EX: RUN_TTL_SECONDS });
   }
   if (run.activeBulkOperationId) {
-    await redis.set(opKey(run.activeBulkOperationId), run.runId, { EX: RUN_TTL_SECONDS });
+    await redis.set(opKey(run.activeBulkOperationId), run.runId, {
+      EX: RUN_TTL_SECONDS,
+    });
   }
   if (isOpenRun(run)) {
     await redis.set(activeKey(run.storeId), run.runId, { EX: RUN_TTL_SECONDS });
@@ -314,7 +380,9 @@ async function assertCurrentLockOwner(
   }
 }
 
-export async function acquireSyncLock(storeId = getStoreId()): Promise<string | null> {
+export async function acquireSyncLock(
+  storeId = getStoreId(),
+): Promise<string | null> {
   const token = randomUUID();
   const redis = await getRedis();
   if (!redis) {
@@ -329,7 +397,10 @@ export async function acquireSyncLock(storeId = getStoreId()): Promise<string | 
   return acquired === "OK" ? token : null;
 }
 
-export async function releaseSyncLock(token: string, storeId = getStoreId()): Promise<void> {
+export async function releaseSyncLock(
+  token: string,
+  storeId = getStoreId(),
+): Promise<void> {
   const redis = await getRedis();
   if (!redis) {
     if (memoryLock?.token === token) memoryLock = null;
@@ -339,7 +410,10 @@ export async function releaseSyncLock(token: string, storeId = getStoreId()): Pr
   if (existing === token) await redis.del(lockKey(storeId));
 }
 
-export async function markIdempotent(key: string, value: string): Promise<boolean> {
+export async function markIdempotent(
+  key: string,
+  value: string,
+): Promise<boolean> {
   const redis = await getRedis();
   const fullKey = idempotencyKey(key);
   if (!redis) {
@@ -354,6 +428,117 @@ export async function markIdempotent(key: string, value: string): Promise<boolea
   return written === "OK";
 }
 
+export async function getIdempotencyValue(key: string): Promise<string | null> {
+  const redis = await getRedis();
+  const fullKey = idempotencyKey(key);
+  if (!redis) return memoryIdempotency.get(fullKey) ?? null;
+  return await redis.get(fullKey);
+}
+
+export async function saveQstashContinuationRecord(
+  record: QstashContinuationRecord,
+): Promise<void> {
+  const redis = await getRedis();
+  if (!redis) {
+    memoryQstashContinuations.set(record.correlationId, record);
+    if (record.messageId) {
+      memoryQstashMessages.set(record.messageId, record.correlationId);
+    }
+    return;
+  }
+  await redis.set(
+    qstashContinuationKey(record.correlationId),
+    JSON.stringify(record),
+    { EX: RUN_TTL_SECONDS },
+  );
+  if (record.messageId) {
+    await redis.set(qstashMessageKey(record.messageId), record.correlationId, {
+      EX: RUN_TTL_SECONDS,
+    });
+  }
+}
+
+export async function updateQstashContinuationRecord(
+  correlationId: string,
+  patch: Partial<Omit<QstashContinuationRecord, "correlationId" | "createdAt">>,
+): Promise<QstashContinuationRecord> {
+  const existing = await getQstashContinuationRecord(correlationId);
+  if (!existing) {
+    throw new Error(
+      `QStash continuation correlation record not found: ${correlationId}`,
+    );
+  }
+  const next = { ...existing, ...patch };
+  await saveQstashContinuationRecord(next);
+  return next;
+}
+
+export async function getQstashContinuationRecord(
+  correlationId: string,
+): Promise<QstashContinuationRecord | null> {
+  const redis = await getRedis();
+  if (!redis) return memoryQstashContinuations.get(correlationId) ?? null;
+  const raw = await redis.get(qstashContinuationKey(correlationId));
+  return raw ? (JSON.parse(raw) as QstashContinuationRecord) : null;
+}
+
+export async function getQstashContinuationRecordByMessageId(
+  messageId: string,
+): Promise<QstashContinuationRecord | null> {
+  const redis = await getRedis();
+  const correlationId = redis
+    ? await redis.get(qstashMessageKey(messageId))
+    : (memoryQstashMessages.get(messageId) ?? null);
+  if (!correlationId) return null;
+  return await getQstashContinuationRecord(correlationId);
+}
+
+export async function savePendingNextContinuation(
+  record: PendingNextContinuation,
+): Promise<void> {
+  const redis = await getRedis();
+  if (!redis) {
+    memoryPendingNextContinuations.set(record.opId, record);
+    return;
+  }
+  await redis.set(pendingNextKey(record.opId), JSON.stringify(record), {
+    EX: RUN_TTL_SECONDS,
+  });
+}
+
+export async function getPendingNextContinuation(
+  opId: string,
+): Promise<PendingNextContinuation | null> {
+  const redis = await getRedis();
+  if (!redis) return memoryPendingNextContinuations.get(opId) ?? null;
+  const raw = await redis.get(pendingNextKey(opId));
+  return raw ? (JSON.parse(raw) as PendingNextContinuation) : null;
+}
+
+export async function markPendingNextContinuationEnqueued({
+  opId,
+  qstashCorrelationId,
+  qstashMessageId,
+}: {
+  opId: string;
+  qstashCorrelationId: string;
+  qstashMessageId: string | null;
+}): Promise<PendingNextContinuation> {
+  const existing = await getPendingNextContinuation(opId);
+  if (!existing) {
+    throw new Error(`pending next-mode continuation not found: ${opId}`);
+  }
+  const next: PendingNextContinuation = {
+    ...existing,
+    state: "enqueued",
+    updatedAt: nowIso(),
+    qstashCorrelationId,
+    qstashMessageId,
+  };
+  await savePendingNextContinuation(next);
+  return next;
+}
+
 export async function listOpenRuns(): Promise<SyncRun[]> {
   const redis = await getRedis();
   if (!redis) {
@@ -366,10 +551,14 @@ export async function listOpenRuns(): Promise<SyncRun[]> {
     if (activeRun && isOpenRun(activeRun)) return [activeRun];
   }
 
-  return (await scanSyncRuns({ redis, limit: SYNC_RUN_SCAN_LIMIT })).filter(isOpenRun);
+  return (await scanSyncRuns({ redis, limit: SYNC_RUN_SCAN_LIMIT })).filter(
+    isOpenRun,
+  );
 }
 
-export async function listSyncRuns(limit = SYNC_RUN_SCAN_LIMIT): Promise<SyncRun[]> {
+export async function listSyncRuns(
+  limit = SYNC_RUN_SCAN_LIMIT,
+): Promise<SyncRun[]> {
   const redis = await getRedis();
   if (!redis) return Array.from(memoryRuns.values());
 
@@ -409,7 +598,9 @@ export async function getLatestSyncRun(
   return selectNewestRun(await scanSyncRuns({ redis, storeId }));
 }
 
-export async function withSyncLock<T>(fn: (fencingToken: string) => Promise<T>): Promise<T | null> {
+export async function withSyncLock<T>(
+  fn: (fencingToken: string) => Promise<T>,
+): Promise<T | null> {
   const token = await acquireSyncLock();
   if (!token) return null;
   try {
@@ -424,5 +615,8 @@ export function __resetMemorySyncStateForTests(): void {
   memoryOpIndex.clear();
   memoryIdempotency.clear();
   memoryLatestRunByStore.clear();
+  memoryQstashContinuations.clear();
+  memoryQstashMessages.clear();
+  memoryPendingNextContinuations.clear();
   memoryLock = null;
 }
