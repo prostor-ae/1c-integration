@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import {
+  getLatestSyncRun,
   getSyncRun,
   isMissingRedisConfig,
-  listSyncRuns,
   type SyncRun,
 } from "@/app/lib/sync-state";
 import { logSyncEvent } from "@/app/lib/sync-logging";
@@ -19,25 +19,6 @@ const RUNNING_STATUSES = new Set<SyncRun["status"]>([
 
 function isRunningSyncRun(run: SyncRun | null): boolean {
   return run ? RUNNING_STATUSES.has(run.status) : false;
-}
-
-function timeValue(value: string | null): number {
-  if (!value) return 0;
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function newestFirst(a: SyncRun, b: SyncRun): number {
-  return (
-    timeValue(b.createdAt) - timeValue(a.createdAt) ||
-    timeValue(b.updatedAt) - timeValue(a.updatedAt)
-  );
-}
-
-function selectGenericStatusRun(runs: SyncRun[]): SyncRun | null {
-  const running = runs.filter(isRunningSyncRun).sort(newestFirst);
-  if (running.length > 0) return running[0];
-  return [...runs].sort(newestFirst)[0] ?? null;
 }
 
 function redactUrl(rawUrl: string): string {
@@ -133,7 +114,7 @@ export async function GET(request: Request) {
       });
     }
 
-    const run = selectGenericStatusRun(await listSyncRuns());
+    const run = await getLatestSyncRun();
     if (!run) {
       logSyncEvent("sync_status_returned", {
         running: false,

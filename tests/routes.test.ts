@@ -155,6 +155,42 @@ test("sync status endpoint defaults to the latest run when nothing is active", a
   assert.equal(body.run.status, "completed");
 });
 
+test("sync status endpoint returns the newest completed run without runId", async () => {
+  const first = await createSyncRun({ modes: ["stock"], source: "manual" });
+  const firstRun = await getSyncRun(first.runId);
+  assert.ok(firstRun);
+  firstRun.createdAt = "2026-01-01T00:00:00.000Z";
+  firstRun.status = "completed";
+  firstRun.currentMode = null;
+  firstRun.currentIndex = firstRun.requestedModes.length;
+  firstRun.completedAt = new Date().toISOString();
+  await saveSyncRun(firstRun);
+
+  const second = await createSyncRun({ modes: ["prices"], source: "cron" });
+  const secondRun = await getSyncRun(second.runId);
+  assert.ok(secondRun);
+  secondRun.createdAt = "2026-01-02T00:00:00.000Z";
+  secondRun.status = "completed";
+  secondRun.currentMode = null;
+  secondRun.currentIndex = secondRun.requestedModes.length;
+  secondRun.completedAt = new Date().toISOString();
+  await saveSyncRun(secondRun);
+
+  const response = await statusGet(
+    new Request("https://example.test/api/sync/status", {
+      headers: { "x-api-key": "secret" },
+    }),
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(body.running, false);
+  assert.equal(body.run.runId, second.runId);
+  assert.equal(body.run.source, "cron");
+  assert.deepEqual(body.run.requestedModes, ["prices"]);
+});
+
 test("sync status endpoint redacts sensitive failure details", async () => {
   const accepted = await createSyncRun({ modes: ["stock"], source: "manual" });
   const run = await getSyncRun(accepted.runId);

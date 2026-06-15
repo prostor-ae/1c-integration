@@ -210,7 +210,7 @@ export async function sendSyncFailureAlert({
     `Mode:    ${mode}`,
     `Reason:  ${reason}`,
     ``,
-    `The API endpoints are quick-ack; absence of this failure email is the normal success signal.`,
+    `The API endpoints are quick-ack; success and failure emails are sent after the async sync run reaches a final state.`,
   ].join("\n");
 
   await sendAlert({ subject, body });

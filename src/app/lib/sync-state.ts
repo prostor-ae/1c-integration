@@ -46,11 +46,14 @@ export type AcceptedRun = {
 const RUN_TTL_SECONDS = 14 * 24 * 60 * 60;
 const IDEMPOTENCY_TTL_SECONDS = 7 * 24 * 60 * 60;
 const LOCK_TTL_MS = 5 * 60 * 1000;
+const SYNC_RUN_SCAN_COUNT = 100;
+const SYNC_RUN_SCAN_LIMIT = 100;
 
 let redisClient: RedisClientType | null = null;
 const memoryRuns = new Map<string, SyncRun>();
 const memoryOpIndex = new Map<string, string>();
 const memoryIdempotency = new Map<string, string>();
+const memoryLatestRunByStore = new Map<string, string>();
 let memoryLock: { token: string; expiresAt: number } | null = null;
 
 class MissingRedisConfigError extends Error {
@@ -80,12 +83,37 @@ function activeKey(storeId: string) {
   return `sync:active:${storeId}`;
 }
 
+function latestKey(storeId: string) {
+  return `sync:latest:${storeId}`;
+}
+
 function lockKey(storeId: string) {
   return `sync:lock:${storeId}`;
 }
 
 function idempotencyKey(key: string) {
   return `sync:idempotency:${key}`;
+}
+
+function timeValue(value: string | null): number {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function newestFirst(a: SyncRun, b: SyncRun): number {
+  return (
+    timeValue(b.createdAt) - timeValue(a.createdAt) ||
+    timeValue(b.updatedAt) - timeValue(a.updatedAt)
+  );
+}
+
+function isOpenRun(run: SyncRun): boolean {
+  return ["queued", "running", "waiting_bulk"].includes(run.status);
+}
+
+function selectNewestRun(runs: SyncRun[]): SyncRun | null {
+  return [...runs].sort(newestFirst)[0] ?? null;
 }
 
 async function getRedis(): Promise<RedisClientType | null> {
@@ -109,7 +137,12 @@ async function getRedis(): Promise<RedisClientType | null> {
 async function saveMemoryRun(run: SyncRun) {
   memoryRuns.set(run.runId, run);
   if (run.activeBulkOperationId) memoryOpIndex.set(run.activeBulkOperationId, run.runId);
-  if (["queued", "running", "waiting_bulk"].includes(run.status)) {
+  const latestRunId = memoryLatestRunByStore.get(run.storeId);
+  const latestRun = latestRunId ? memoryRuns.get(latestRunId) : null;
+  if (!latestRun || latestRun.runId === run.runId || newestFirst(run, latestRun) < 0) {
+    memoryLatestRunByStore.set(run.storeId, run.runId);
+  }
+  if (isOpenRun(run)) {
     memoryIdempotency.set(activeKey(run.storeId), run.runId);
   } else if (memoryIdempotency.get(activeKey(run.storeId)) === run.runId) {
     memoryIdempotency.delete(activeKey(run.storeId));
@@ -132,7 +165,7 @@ export async function createSyncRun({
     : memoryIdempotency.get(activeKey(storeId));
   if (existingRunId) {
     const existingRun = await getSyncRun(existingRunId);
-    if (existingRun && ["queued", "running", "waiting_bulk"].includes(existingRun.status)) {
+    if (existingRun && isOpenRun(existingRun)) {
       return {
         runId: existingRun.runId,
         accepted: false,
@@ -173,6 +206,7 @@ export async function createSyncRun({
   } else {
     await redis.set(runKey(run.runId), JSON.stringify(run), { EX: RUN_TTL_SECONDS });
     await redis.set(activeKey(storeId), run.runId, { EX: RUN_TTL_SECONDS });
+    await redis.set(latestKey(storeId), run.runId, { EX: RUN_TTL_SECONDS });
   }
 
   return {
@@ -215,15 +249,51 @@ export async function saveSyncRun(run: SyncRun, fencingToken?: string): Promise<
     return;
   }
   await redis.set(runKey(run.runId), JSON.stringify(run), { EX: RUN_TTL_SECONDS });
+  const latestRunId = await redis.get(latestKey(run.storeId));
+  if (!latestRunId || latestRunId === run.runId) {
+    await redis.set(latestKey(run.storeId), run.runId, { EX: RUN_TTL_SECONDS });
+  }
   if (run.activeBulkOperationId) {
     await redis.set(opKey(run.activeBulkOperationId), run.runId, { EX: RUN_TTL_SECONDS });
   }
-  if (["queued", "running", "waiting_bulk"].includes(run.status)) {
+  if (isOpenRun(run)) {
     await redis.set(activeKey(run.storeId), run.runId, { EX: RUN_TTL_SECONDS });
   } else {
     const activeRunId = await redis.get(activeKey(run.storeId));
     if (activeRunId === run.runId) await redis.del(activeKey(run.storeId));
   }
+}
+
+async function scanSyncRuns({
+  redis,
+  storeId,
+  limit = SYNC_RUN_SCAN_LIMIT,
+}: {
+  redis: RedisClientType;
+  storeId?: string;
+  limit?: number;
+}): Promise<SyncRun[]> {
+  let cursor = 0;
+  const runs: SyncRun[] = [];
+
+  do {
+    const reply = await redis.scan(cursor, {
+      MATCH: "sync:run:*",
+      COUNT: SYNC_RUN_SCAN_COUNT,
+    });
+    cursor = reply.cursor;
+
+    for (const key of reply.keys) {
+      const raw = await redis.get(key);
+      if (!raw) continue;
+      const run = JSON.parse(raw) as SyncRun;
+      if (storeId && run.storeId !== storeId) continue;
+      runs.push(run);
+      if (runs.length >= limit) return runs;
+    }
+  } while (cursor !== 0);
+
+  return runs;
 }
 
 async function assertCurrentLockOwner(
@@ -287,33 +357,56 @@ export async function markIdempotent(key: string, value: string): Promise<boolea
 export async function listOpenRuns(): Promise<SyncRun[]> {
   const redis = await getRedis();
   if (!redis) {
-    return Array.from(memoryRuns.values()).filter((run) =>
-      ["queued", "running", "waiting_bulk"].includes(run.status)
-    );
+    return Array.from(memoryRuns.values()).filter(isOpenRun);
   }
-  const keys = await redis.keys("sync:run:*");
-  const runs: SyncRun[] = [];
-  for (const key of keys) {
-    const raw = await redis.get(key);
-    if (!raw) continue;
-    const run = JSON.parse(raw) as SyncRun;
-    if (["queued", "running", "waiting_bulk"].includes(run.status)) runs.push(run);
+
+  const activeRunId = await redis.get(activeKey(getStoreId()));
+  if (activeRunId) {
+    const activeRun = await getSyncRun(activeRunId);
+    if (activeRun && isOpenRun(activeRun)) return [activeRun];
   }
-  return runs;
+
+  return (await scanSyncRuns({ redis, limit: SYNC_RUN_SCAN_LIMIT })).filter(isOpenRun);
 }
 
-export async function listSyncRuns(): Promise<SyncRun[]> {
+export async function listSyncRuns(limit = SYNC_RUN_SCAN_LIMIT): Promise<SyncRun[]> {
   const redis = await getRedis();
   if (!redis) return Array.from(memoryRuns.values());
 
-  const keys = await redis.keys("sync:run:*");
-  const runs: SyncRun[] = [];
-  for (const key of keys) {
-    const raw = await redis.get(key);
-    if (!raw) continue;
-    runs.push(JSON.parse(raw) as SyncRun);
+  return await scanSyncRuns({ redis, limit });
+}
+
+export async function getLatestSyncRun(
+  storeId = getStoreId(),
+): Promise<SyncRun | null> {
+  const redis = await getRedis();
+  if (!redis) {
+    const activeRunId = memoryIdempotency.get(activeKey(storeId));
+    const activeRun = activeRunId ? memoryRuns.get(activeRunId) : null;
+    if (activeRun && isOpenRun(activeRun)) return activeRun;
+
+    const latestRunId = memoryLatestRunByStore.get(storeId);
+    const latestRun = latestRunId ? memoryRuns.get(latestRunId) : null;
+    if (latestRun) return latestRun;
+
+    return selectNewestRun(
+      Array.from(memoryRuns.values()).filter((run) => run.storeId === storeId),
+    );
   }
-  return runs;
+
+  const activeRunId = await redis.get(activeKey(storeId));
+  if (activeRunId) {
+    const activeRun = await getSyncRun(activeRunId);
+    if (activeRun && isOpenRun(activeRun)) return activeRun;
+  }
+
+  const latestRunId = await redis.get(latestKey(storeId));
+  if (latestRunId) {
+    const latestRun = await getSyncRun(latestRunId);
+    if (latestRun) return latestRun;
+  }
+
+  return selectNewestRun(await scanSyncRuns({ redis, storeId }));
 }
 
 export async function withSyncLock<T>(fn: (fencingToken: string) => Promise<T>): Promise<T | null> {
@@ -330,5 +423,6 @@ export function __resetMemorySyncStateForTests(): void {
   memoryRuns.clear();
   memoryOpIndex.clear();
   memoryIdempotency.clear();
+  memoryLatestRunByStore.clear();
   memoryLock = null;
 }
