@@ -1,4 +1,5 @@
 import { Resend } from "resend";
+import type { SyncRun } from "./sync-state";
 
 type SendAlertArgs = {
   subject: string;
@@ -51,6 +52,7 @@ export async function sendAlert({ subject, body }: SendAlertArgs): Promise<void>
     console.error(
       JSON.stringify({
         event: "alert_send_failed",
+        subject,
         error: error?.message ?? String(error),
       })
     );
@@ -212,4 +214,72 @@ export async function sendSyncFailureAlert({
   ].join("\n");
 
   await sendAlert({ subject, body });
+}
+
+function formatModeNumberRecord(
+  record: Partial<Record<string, number>>,
+  modes: string[],
+): string {
+  const keys = Array.from(new Set([...modes, ...Object.keys(record)])).filter(
+    (mode) => record[mode] !== undefined,
+  );
+  if (keys.length === 0) return "  (none)";
+  return keys.map((mode) => `  - ${mode}: ${record[mode]}`).join("\n");
+}
+
+function formatSkippedRecord(
+  record: Partial<Record<string, string>>,
+  modes: string[],
+): string {
+  const keys = Array.from(new Set([...modes, ...Object.keys(record)])).filter(
+    (mode) => record[mode],
+  );
+  if (keys.length === 0) return "  (none)";
+  return keys.map((mode) => `  - ${mode}: ${record[mode]}`).join("\n");
+}
+
+export function buildSyncSuccessAlert({ run }: { run: SyncRun }): SendAlertArgs {
+  const modes = run.requestedModes;
+  const modeLabel = modes.join(", ") || "none";
+  const hasWarnings = Object.keys(run.skippedByMode).length > 0;
+  const subject = hasWarnings
+    ? `[1c-integration] Sync completed with warnings (${modeLabel})`
+    : `[1c-integration] Sync completed (${modeLabel})`;
+
+  const body = [
+    hasWarnings
+      ? `A sync run completed, but one or more modes were skipped or need operator review.`
+      : `A sync run completed successfully.`,
+    ``,
+    `Run id:      ${run.runId}`,
+    `Source:      ${run.source}`,
+    `Status:      ${run.status}`,
+    `Modes:       ${modeLabel}`,
+    `Created at:  ${run.createdAt}`,
+    `Updated at:  ${run.updatedAt}`,
+    `Completed:   ${run.completedAt ?? "(not recorded)"}`,
+    ``,
+    `Proposed updates by mode:`,
+    formatModeNumberRecord(run.proposedByMode, modes),
+    ``,
+    `Applied updates by mode:`,
+    formatModeNumberRecord(run.appliedByMode, modes),
+    ``,
+    `Skipped/warning reasons:`,
+    formatSkippedRecord(run.skippedByMode, modes),
+    run.failureReason ? `` : null,
+    run.failureReason ? `Failure reason field: ${run.failureReason}` : null,
+  ]
+    .filter((line): line is string => line !== null)
+    .join("\n");
+
+  return { subject, body };
+}
+
+export async function sendSyncSuccessAlert({
+  run,
+}: {
+  run: SyncRun;
+}): Promise<void> {
+  await sendAlert(buildSyncSuccessAlert({ run }));
 }

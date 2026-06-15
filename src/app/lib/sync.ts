@@ -22,6 +22,7 @@ import {
   sendEmptyPayloadAlert,
   sendSafetyFloorAlert,
   sendSyncFailureAlert,
+  sendSyncSuccessAlert,
 } from "./alerts";
 import {
   canonicalizeModes,
@@ -241,6 +242,7 @@ export async function continueSyncRun(
             durationMs: Date.now() - startedAt,
             ...summarizeSyncRun(run),
           });
+          await sendSyncSuccessAlert({ run });
           return run;
         }
       } catch (error: any) {
@@ -276,6 +278,7 @@ export async function continueSyncRun(
       durationMs: Date.now() - startedAt,
       ...summarizeSyncRun(run),
     });
+    await sendSyncSuccessAlert({ run });
     return run;
   });
 }
@@ -749,6 +752,7 @@ export async function handleBulkOperationFinished({
           completionSource: source,
           ...summarizeSyncRun(run),
         });
+        await sendSyncSuccessAlert({ run });
       }
       return run;
     }

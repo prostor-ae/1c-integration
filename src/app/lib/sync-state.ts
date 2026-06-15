@@ -302,6 +302,20 @@ export async function listOpenRuns(): Promise<SyncRun[]> {
   return runs;
 }
 
+export async function listSyncRuns(): Promise<SyncRun[]> {
+  const redis = await getRedis();
+  if (!redis) return Array.from(memoryRuns.values());
+
+  const keys = await redis.keys("sync:run:*");
+  const runs: SyncRun[] = [];
+  for (const key of keys) {
+    const raw = await redis.get(key);
+    if (!raw) continue;
+    runs.push(JSON.parse(raw) as SyncRun);
+  }
+  return runs;
+}
+
 export async function withSyncLock<T>(fn: (fencingToken: string) => Promise<T>): Promise<T | null> {
   const token = await acquireSyncLock();
   if (!token) return null;

@@ -14,7 +14,7 @@ import {
 beforeEach(() => {
   delete process.env.REDIS_URL;
   delete process.env.VERCEL_ENV;
-  process.env.NODE_ENV = "test";
+  Object.assign(process.env, { NODE_ENV: "test" });
   __resetMemorySyncStateForTests();
 });
 
@@ -83,7 +83,7 @@ test("released fencing tokens cannot save a sync run", async () => {
 });
 
 test("production without REDIS_URL fails closed", async () => {
-  process.env.NODE_ENV = "production";
+  Object.assign(process.env, { NODE_ENV: "production" });
   process.env.VERCEL_ENV = "production";
 
   await assert.rejects(

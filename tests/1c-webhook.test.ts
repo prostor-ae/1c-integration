@@ -10,7 +10,7 @@ import type { ShopifyProductInfo } from "../src/app/lib/shopify-client";
 
 beforeEach(() => {
   delete process.env.ONE_C_WEBHOOK_KEY;
-  process.env.NODE_ENV = "test";
+  Object.assign(process.env, { NODE_ENV: "test" });
 });
 
 function product(
@@ -23,6 +23,7 @@ function product(
     id,
     handle: id.toLowerCase(),
     status,
+    weightKg: 1,
     variants: [
       {
         id: `${id}-variant`,
