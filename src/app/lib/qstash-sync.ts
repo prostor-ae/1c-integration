@@ -157,27 +157,33 @@ export function buildSyncContinuationFailureCallbackUrl({
   )}`;
 }
 
+function buildSafeDeduplicationId(prefix: string, parts: unknown[]): string {
+  const digest = createHash("sha256")
+    .update(JSON.stringify(parts))
+    .digest("hex");
+  return `${prefix}-${digest}`;
+}
+
 export function buildSyncContinuationDeduplicationId(
   payload: SyncContinuationPayload,
 ): string {
   if (payload.kind === "continue-run") {
-    return [
-      "sync",
-      "continue",
+    return buildSafeDeduplicationId("sync-continue", [
+      payload.kind,
       payload.runId,
       payload.currentIndex,
-      payload.currentMode ?? "none",
+      payload.currentMode ?? null,
       payload.source,
-    ].join(":");
+    ]);
   }
 
-  return [
-    "sync",
-    "bulk-finish",
+  return buildSafeDeduplicationId("sync-bulk-finish", [
+    payload.kind,
     payload.opId,
     payload.status.toUpperCase(),
-    payload.errorCode ?? "null",
-  ].join(":");
+    payload.errorCode ?? null,
+    payload.source,
+  ]);
 }
 
 export function buildSyncContinuationCorrelationId(

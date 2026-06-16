@@ -15,6 +15,17 @@ import { __resetMemorySyncStateForTests } from "../src/app/lib/sync-state";
 
 let publishedContinuations: SyncContinuationPublishRequest[] = [];
 
+function assertSafeBulkFinishDeduplicationId(
+  request: SyncContinuationPublishRequest,
+): void {
+  assert.match(
+    request.deduplicationId ?? "",
+    /^sync-bulk-finish-[a-f0-9]{64}$/,
+  );
+  assert.equal(request.deduplicationId?.includes(":"), false);
+  assert.equal(request.deduplicationId?.includes("/"), false);
+}
+
 beforeEach(() => {
   delete process.env.REDIS_URL;
   delete process.env.VERCEL_ENV;
@@ -25,6 +36,8 @@ beforeEach(() => {
   __resetQstashSyncForTests();
   publishedContinuations = [];
   __setSyncContinuationPublisherForTests(async (request) => {
+    assert.equal(request.deduplicationId?.includes(":"), false);
+    assert.equal(request.deduplicationId?.includes("/"), false);
     publishedContinuations.push(request);
     return {
       messageId: `msg_${publishedContinuations.length}`,
@@ -87,6 +100,7 @@ test("bulk-operation webhook publishes QStash continuation before final 2xx", as
     errorCode: null,
     source: "shopify-webhook",
   });
+  assertSafeBulkFinishDeduplicationId(publishedContinuations[0]);
   const storedMarker = await getWebhookIdempotencyValue({
     topic: "bulk_operations/finish",
     operationId: "gid://shopify/BulkOperation/1",

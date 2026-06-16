@@ -21,6 +21,18 @@ import {
 
 let publishedContinuations: SyncContinuationPublishRequest[] = [];
 
+function assertSafePublishedDeduplicationId(
+  request: SyncContinuationPublishRequest,
+  prefix: string,
+): void {
+  assert.match(
+    request.deduplicationId ?? "",
+    new RegExp(`^${prefix}-[a-f0-9]{64}$`),
+  );
+  assert.equal(request.deduplicationId?.includes(":"), false);
+  assert.equal(request.deduplicationId?.includes("/"), false);
+}
+
 beforeEach(() => {
   delete process.env.REDIS_URL;
   delete process.env.VERCEL_ENV;
@@ -35,6 +47,8 @@ beforeEach(() => {
   __resetQstashSyncForTests();
   publishedContinuations = [];
   __setSyncContinuationPublisherForTests(async (request) => {
+    assert.equal(request.deduplicationId?.includes(":"), false);
+    assert.equal(request.deduplicationId?.includes("/"), false);
     publishedContinuations.push(request);
     return {
       messageId: `msg_${publishedContinuations.length}`,
@@ -62,6 +76,10 @@ test("manual sync trigger quick-acks accepted run", async () => {
   assert.equal(publishedContinuations[0].body.kind, "continue-run");
   assert.equal(publishedContinuations[0].body.source, "manual");
   assert.equal(publishedContinuations[0].body.runId, body.runId);
+  assertSafePublishedDeduplicationId(
+    publishedContinuations[0],
+    "sync-continue",
+  );
 });
 
 test("sync status endpoint rejects missing API key", async () => {
@@ -273,6 +291,10 @@ test("daily cron quick-acks accepted run", async () => {
   assert.equal(publishedContinuations.length, 1);
   assert.equal(publishedContinuations[0].body.kind, "continue-run");
   assert.equal(publishedContinuations[0].body.source, "cron");
+  assertSafePublishedDeduplicationId(
+    publishedContinuations[0],
+    "sync-continue",
+  );
 });
 
 test("production daily cron accepts Vercel CRON_SECRET bearer auth before sync config checks", async () => {

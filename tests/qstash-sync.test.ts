@@ -29,6 +29,17 @@ import {
 
 let publishedContinuations: SyncContinuationPublishRequest[] = [];
 
+const SAFE_CONTINUE_DEDUPLICATION_ID = /^sync-continue-[a-f0-9]{64}$/;
+const SAFE_BULK_FINISH_DEDUPLICATION_ID = /^sync-bulk-finish-[a-f0-9]{64}$/;
+const SAFE_SYNC_DEDUPLICATION_ID =
+  /^sync-(?:continue|bulk-finish)-[a-f0-9]{64}$/;
+
+function assertSafeDeduplicationId(id: string, pattern: RegExp): void {
+  assert.match(id, pattern);
+  assert.equal(id.includes(":"), false);
+  assert.equal(id.includes("/"), false);
+}
+
 beforeEach(() => {
   delete process.env.REDIS_URL;
   delete process.env.VERCEL_ENV;
@@ -43,6 +54,10 @@ beforeEach(() => {
   __setBulkOperationByIdForTests(null);
   publishedContinuations = [];
   __setSyncContinuationPublisherForTests(async (request) => {
+    assertSafeDeduplicationId(
+      request.deduplicationId ?? "",
+      SAFE_SYNC_DEDUPLICATION_ID,
+    );
     publishedContinuations.push(request);
     return {
       messageId: `msg_${publishedContinuations.length}`,
@@ -60,6 +75,14 @@ test("continue-run dedupe is step-aware", () => {
     currentIndex: 0,
     currentMode: "prices",
   });
+  const firstAgain = buildSyncContinuationDeduplicationId({
+    kind: "continue-run",
+    runId: "run-1",
+    source: "bulk-finish",
+    currentIndex: 0,
+    currentMode: "prices",
+    runVersion: 123,
+  });
   const second = buildSyncContinuationDeduplicationId({
     kind: "continue-run",
     runId: "run-1",
@@ -67,10 +90,56 @@ test("continue-run dedupe is step-aware", () => {
     currentIndex: 1,
     currentMode: "stock",
   });
+  const differentSource = buildSyncContinuationDeduplicationId({
+    kind: "continue-run",
+    runId: "run-1",
+    source: "manual",
+    currentIndex: 0,
+    currentMode: "prices",
+  });
 
+  assert.equal(first, firstAgain);
   assert.notEqual(first, second);
-  assert.match(first, /run-1:0:prices:bulk-finish$/);
-  assert.match(second, /run-1:1:stock:bulk-finish$/);
+  assert.notEqual(first, differentSource);
+  assertSafeDeduplicationId(first, SAFE_CONTINUE_DEDUPLICATION_ID);
+  assertSafeDeduplicationId(second, SAFE_CONTINUE_DEDUPLICATION_ID);
+});
+
+test("bulk-finish dedupe is status-canonical and QStash-safe", () => {
+  const first = buildSyncContinuationDeduplicationId({
+    kind: "bulk-finish",
+    opId: "gid://shopify/BulkOperation/1",
+    status: "completed",
+    errorCode: null,
+    source: "shopify-webhook",
+  });
+  const firstAgain = buildSyncContinuationDeduplicationId({
+    kind: "bulk-finish",
+    opId: "gid://shopify/BulkOperation/1",
+    status: "COMPLETED",
+    errorCode: null,
+    source: "shopify-webhook",
+  });
+  const differentStatus = buildSyncContinuationDeduplicationId({
+    kind: "bulk-finish",
+    opId: "gid://shopify/BulkOperation/1",
+    status: "FAILED",
+    errorCode: null,
+    source: "shopify-webhook",
+  });
+  const differentError = buildSyncContinuationDeduplicationId({
+    kind: "bulk-finish",
+    opId: "gid://shopify/BulkOperation/1",
+    status: "FAILED",
+    errorCode: "INTERNAL_SERVER_ERROR",
+    source: "shopify-webhook",
+  });
+
+  assert.equal(first, firstAgain);
+  assert.notEqual(first, differentStatus);
+  assert.notEqual(differentStatus, differentError);
+  assertSafeDeduplicationId(first, SAFE_BULK_FINISH_DEDUPLICATION_ID);
+  assertSafeDeduplicationId(differentError, SAFE_BULK_FINISH_DEDUPLICATION_ID);
 });
 
 test("enqueue uses app base URL, not QSTASH_URL, and stores failure correlation", async () => {
@@ -92,6 +161,14 @@ test("enqueue uses app base URL, not QSTASH_URL, and stores failure correlation"
   assert.equal(
     publishedContinuations[0].url,
     "https://sync.example.test/api/internal/sync/continuation",
+  );
+  assert.equal(
+    result.deduplicationId,
+    publishedContinuations[0].deduplicationId,
+  );
+  assertSafeDeduplicationId(
+    result.deduplicationId,
+    SAFE_CONTINUE_DEDUPLICATION_ID,
   );
   assert.match(
     publishedContinuations[0].failureCallback ?? "",
