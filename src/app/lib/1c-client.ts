@@ -21,18 +21,13 @@ async function fetch1cData(url: string): Promise<Record<string, number>> {
 
   const headers = new Headers();
   if (username && password) {
-    headers.append(
-      "Authorization",
-      "Basic " + btoa(username + ":" + password)
-    );
+    headers.append("Authorization", "Basic " + btoa(username + ":" + password));
   }
 
   const response = await fetch(url, { headers });
 
   if (!response.ok) {
-    throw new Error(
-      `Failed to fetch from ${url}: ${response.statusText}`
-    );
+    throw new Error(`Failed to fetch from ${url}: ${response.statusText}`);
   }
 
   const data = await response.json();

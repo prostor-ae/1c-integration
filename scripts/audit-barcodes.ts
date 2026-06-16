@@ -115,7 +115,7 @@ async function main() {
     if (list.length > 1) duplicates.push([barcode, list]);
   });
 
-  console.log(`Variants with blank barcode ${blank.length}`);
+  console.log(`Variants with blank barcode ${blank.length}.`);
   for (const v of blank.slice(0, 100)) {
     console.log(`  ${v.productHandle} | ${v.variantId}`);
   }
