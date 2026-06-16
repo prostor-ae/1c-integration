@@ -24,6 +24,8 @@ Rotation is **manual**: rotate the value in the Vercel UI for the affected envir
 | --------------------------- | -------------------------------- | ------------------------------------------------------------------ |
 | `SHOPIFY_STORE_DOMAIN`      | Vercel project envs (per env)    | Rotate in Vercel UI, redeploy                                      |
 | `SHOPIFY_ADMIN_TOKEN`       | Vercel project envs (per env)    | Rotate in Shopify admin, update in Vercel UI, redeploy             |
+| `SHOPIFY_TARGET`            | Vercel project envs (per env)    | Set to `test` or `production`; redeploy after changing             |
+| `SHOPIFY_FORCE_TEST`        | Legacy Vercel project env        | Optional legacy boolean. Prefer `SHOPIFY_TARGET`                   |
 | `SHOPIFY_STORE_DOMAIN_TEST` | Vercel project envs (per env)    | Rotate in Vercel UI, redeploy                                      |
 | `SHOPIFY_ADMIN_TOKEN_TEST`  | Vercel project envs (per env)    | Rotate in Shopify admin (test shop), update in Vercel UI, redeploy |
 | `INTERNAL_API_KEY`          | Vercel project envs (per env)    | Rotate in Vercel UI, redeploy, update any caller                   |
@@ -186,15 +188,15 @@ Required production infrastructure:
 - `CRON_SECRET` for Vercel Cron authentication. Vercel sends it as
   `Authorization: Bearer <CRON_SECRET>` when invoking cron routes.
 - `SHOPIFY_WEBHOOK_SECRET` (or `SHOPIFY_API_SECRET_KEY` / `SHOPIFY_CLIENT_SECRET`) for Shopify HMAC verification.
-- Register Shopify `bulk_operations/finish` webhook to `/api/webhooks/shopify/bulk-operations`.
+- Register Shopify `bulk_operations/finish` webhook to `/api/webhooks/shopify/bulk-operations` on the **effective** Shopify target. The app defaults to the test target for backward-compatible safety unless `SHOPIFY_TARGET=production` or `SHOPIFY_FORCE_TEST=false` is configured. Use `node scripts/register-shopify-webhook.mjs --target=test` for test, `--target=production` for production, or `--target=both` when both shops are intentionally active.
 
 Operational model:
 
 - `/api/cron/daily-sync` schedules the daily `prices -> stock` run and returns quickly.
 - `/api/sync/trigger` schedules manual modes in canonical order `costs -> prices -> stock` and returns quickly.
-- `/api/webhooks/shopify/bulk-operations` records Shopify bulk completion and advances the next mode idempotently.
+- `/api/webhooks/shopify/bulk-operations` accepts Shopify bulk completion webhooks from the effective Shopify shop and enqueues a QStash `bulk-finish` continuation; the continuation advances the next mode idempotently.
 - `/api/cron/reconcile-sync` repairs missed webhook transitions and alerts for stale operations.
-- There is no dashboard/run history requirement. A failure email/log is the operator signal; otherwise the run may be considered successful enough.
+- There is no dashboard/run history requirement. Success and failure emails/logs are the operator signals for completed sync runs.
 
 Useful Vercel log events:
 
@@ -202,12 +204,12 @@ Useful Vercel log events:
 - `sync_mode_diff_computed` — 1C vs Shopify comparison finished for one mode; includes counts such as `proposedUpdates`, `shopifyProductCount`, `oneCPriceCount`, or `proposedDraftFlips`.
 - `shopify_bulk_mutation_jsonl_uploaded` — staged JSONL upload to Shopify succeeded.
 - `shopify_bulk_mutation_started` / `sync_mode_waiting_bulk` — Shopify accepted the bulk mutation and the run is waiting for Shopify completion.
-- `shopify_bulk_webhook_recorded` — Shopify sent a bulk-operation finish webhook.
+- `shopify_bulk_webhook_enqueued` — Shopify sent a bulk-operation finish webhook and the app enqueued QStash processing. If this marker is missing for a completed bulk operation, the webhook was not accepted/enqueued for that shop.
 - `sync_bulk_operation_completed` — the app processed a completed Shopify bulk operation, marked the mode applied, and either scheduled the next mode or completed the run.
 - `sync_run_completed` — all requested modes finished.
 - `sync_reconcile_*` — reconcile cron inspected/continued a stuck or missed run.
 
-Every structured sync log also includes secret-safe runtime context such as `vercelEnv`, `shopifyTarget`, `shopifyForcedTest`, `shopifyDomain`, and `shopifyApiVersion`, so production Vercel logs show whether the deployment is currently targeting the test or production Shopify store without exposing tokens.
+Every structured sync log also includes secret-safe runtime context such as `vercelEnv`, `shopifyTarget`, `shopifyTargetSource`, `shopifyForcedTest`, `shopifyDomain`, and `shopifyApiVersion`, so production Vercel logs show whether the deployment is currently targeting the test or production Shopify store without exposing tokens.
 
 Cron recovery SLA:
 

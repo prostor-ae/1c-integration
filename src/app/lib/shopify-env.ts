@@ -1,10 +1,10 @@
-import { SHOPIFY_API_VERSION } from "./config";
-
-const FORCE_TEST_SHOPIFY = true;
+import { SHOPIFY_API_VERSION, getShopifyTargetConfig } from "./config";
 
 type ShopifyEnvSelector = {
   requestedIsTest: boolean;
   effectiveIsTest: boolean;
+  targetSource: string;
+  forceTest: boolean;
   rawDomain: string | undefined;
   token: string | undefined;
 };
@@ -23,10 +23,13 @@ export function normalizeShopifyDomain(rawDomain: string): string {
 }
 
 function selectShopifyEnv(isTest = false): ShopifyEnvSelector {
-  const effectiveIsTest = FORCE_TEST_SHOPIFY || isTest;
+  const configured = getShopifyTargetConfig();
+  const effectiveIsTest = isTest || configured.target === "test";
   return {
     requestedIsTest: isTest,
     effectiveIsTest,
+    targetSource: configured.source,
+    forceTest: configured.forceTest,
     rawDomain: effectiveIsTest
       ? process.env.SHOPIFY_STORE_DOMAIN_TEST
       : process.env.SHOPIFY_STORE_DOMAIN,
@@ -48,7 +51,7 @@ export function getShopifyCredentials(isTest = false): {
         env.effectiveIsTest
           ? "SHOPIFY_STORE_DOMAIN_TEST/SHOPIFY_ADMIN_TOKEN_TEST"
           : "SHOPIFY_STORE_DOMAIN/SHOPIFY_ADMIN_TOKEN"
-      } environment variables.`,
+      } environment variables. Effective Shopify target source: ${env.targetSource}.`,
     );
   }
 
@@ -76,7 +79,8 @@ export function getShopifyLogContext(isTest = false) {
     shopifyApiVersion: SHOPIFY_API_VERSION,
     shopifyRequestedTarget: env.requestedIsTest ? "test" : "production",
     shopifyTarget: env.effectiveIsTest ? "test" : "production",
-    shopifyForcedTest: FORCE_TEST_SHOPIFY,
+    shopifyTargetSource: env.targetSource,
+    shopifyForcedTest: env.forceTest,
     shopifyDomain: domain,
     shopifyDomainValid: domainValid,
     shopifyCredentialsConfigured: Boolean(env.rawDomain && env.token),

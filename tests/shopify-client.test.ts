@@ -20,6 +20,7 @@ import {
   isSyncableOneCDiscount,
   isSyncableOneCPrice,
 } from "../src/app/lib/one-c-values";
+import { getStoreId } from "../src/app/lib/config";
 
 test("normalizeShopifyDomain accepts bare domains and full URLs", () => {
   assert.equal(
@@ -203,8 +204,10 @@ test("callShopify retry exhaustion includes GraphQL throttle cost details", asyn
   }
 });
 
-test("getShopifyLogContext reports forced test target without exposing token", () => {
+function withShopifyTargetEnv(fn: () => void): void {
   const previous = {
+    SHOPIFY_TARGET: process.env.SHOPIFY_TARGET,
+    SHOPIFY_FORCE_TEST: process.env.SHOPIFY_FORCE_TEST,
     SHOPIFY_STORE_DOMAIN: process.env.SHOPIFY_STORE_DOMAIN,
     SHOPIFY_ADMIN_TOKEN: process.env.SHOPIFY_ADMIN_TOKEN,
     SHOPIFY_STORE_DOMAIN_TEST: process.env.SHOPIFY_STORE_DOMAIN_TEST,
@@ -218,15 +221,7 @@ test("getShopifyLogContext reports forced test target without exposing token", (
   process.env.SHOPIFY_ADMIN_TOKEN_TEST = "test-token";
 
   try {
-    const context = getShopifyLogContext(false);
-
-    assert.equal(context.shopifyRequestedTarget, "production");
-    assert.equal(context.shopifyTarget, "test");
-    assert.equal(context.shopifyForcedTest, true);
-    assert.equal(context.shopifyDomain, "test-shop.myshopify.com");
-    assert.equal(context.shopifyCredentialsConfigured, true);
-    assert.equal(JSON.stringify(context).includes("test-token"), false);
-    assert.equal(JSON.stringify(context).includes("prod-token"), false);
+    fn();
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) {
@@ -236,6 +231,71 @@ test("getShopifyLogContext reports forced test target without exposing token", (
       }
     }
   }
+}
+
+test("getShopifyLogContext defaults to safe test target without exposing token", () => {
+  withShopifyTargetEnv(() => {
+    delete process.env.SHOPIFY_TARGET;
+    delete process.env.SHOPIFY_FORCE_TEST;
+
+    const context = getShopifyLogContext(false);
+
+    assert.equal(context.shopifyRequestedTarget, "production");
+    assert.equal(context.shopifyTarget, "test");
+    assert.equal(context.shopifyTargetSource, "default_safe_test");
+    assert.equal(context.shopifyForcedTest, true);
+    assert.equal(context.shopifyDomain, "test-shop.myshopify.com");
+    assert.equal(getStoreId(), "test-shop.myshopify.com");
+    assert.equal(context.shopifyCredentialsConfigured, true);
+    assert.equal(JSON.stringify(context).includes("test-token"), false);
+    assert.equal(JSON.stringify(context).includes("prod-token"), false);
+  });
+});
+
+test("SHOPIFY_TARGET=production selects production shop and store id", () => {
+  withShopifyTargetEnv(() => {
+    process.env.SHOPIFY_TARGET = "production";
+    delete process.env.SHOPIFY_FORCE_TEST;
+
+    const context = getShopifyLogContext(false);
+
+    assert.equal(context.shopifyTarget, "production");
+    assert.equal(context.shopifyTargetSource, "SHOPIFY_TARGET");
+    assert.equal(context.shopifyForcedTest, false);
+    assert.equal(context.shopifyDomain, "prod-shop.myshopify.com");
+    assert.equal(getStoreId(), "prod-shop.myshopify.com");
+  });
+});
+
+test("SHOPIFY_FORCE_TEST=false is a legacy production opt-in", () => {
+  withShopifyTargetEnv(() => {
+    delete process.env.SHOPIFY_TARGET;
+    process.env.SHOPIFY_FORCE_TEST = "false";
+
+    const context = getShopifyLogContext(false);
+
+    assert.equal(context.shopifyTarget, "production");
+    assert.equal(context.shopifyTargetSource, "SHOPIFY_FORCE_TEST");
+    assert.equal(context.shopifyForcedTest, false);
+    assert.equal(context.shopifyDomain, "prod-shop.myshopify.com");
+    assert.equal(getStoreId(), "prod-shop.myshopify.com");
+  });
+});
+
+test("explicit Shopify targets fail closed when the selected store domain is missing", () => {
+  withShopifyTargetEnv(() => {
+    process.env.SHOPIFY_TARGET = "test";
+    delete process.env.SHOPIFY_STORE_DOMAIN_TEST;
+
+    assert.throws(() => getStoreId(), /Missing SHOPIFY_STORE_DOMAIN_TEST/);
+  });
+
+  withShopifyTargetEnv(() => {
+    process.env.SHOPIFY_TARGET = "production";
+    delete process.env.SHOPIFY_STORE_DOMAIN;
+
+    assert.throws(() => getStoreId(), /Missing SHOPIFY_STORE_DOMAIN/);
+  });
 });
 
 test("buildVariantIdentifierSearchQuery targets barcode and SKU fields", () => {

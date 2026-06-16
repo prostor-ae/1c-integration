@@ -1,6 +1,6 @@
 import { createClient, type RedisClientType } from "redis";
 import { randomUUID } from "crypto";
-import { getRedisConfig, getStoreId } from "./config";
+import { getRedisConfig, getStoreId, getStoreIdAliases } from "./config";
 import {
   canonicalizeModes,
   type ModeResult,
@@ -184,6 +184,49 @@ async function getRedis(): Promise<RedisClientType | null> {
   return redisClient;
 }
 
+async function readActiveRunId(
+  redis: RedisClientType | null,
+  storeId: string,
+): Promise<string | undefined | null> {
+  return redis
+    ? await redis.get(activeKey(storeId))
+    : memoryIdempotency.get(activeKey(storeId));
+}
+
+async function mirrorActiveRunKey({
+  redis,
+  fromStoreId,
+  toStoreId,
+  runId,
+}: {
+  redis: RedisClientType | null;
+  fromStoreId: string;
+  toStoreId: string;
+  runId: string;
+}): Promise<void> {
+  if (fromStoreId === toStoreId) return;
+  if (!redis) {
+    memoryIdempotency.set(activeKey(toStoreId), runId);
+    return;
+  }
+  await redis.set(activeKey(toStoreId), runId, { EX: RUN_TTL_SECONDS });
+}
+
+async function findOpenActiveRun(
+  redis: RedisClientType | null,
+  storeIds: string[],
+): Promise<{ run: SyncRun; matchedStoreId: string } | null> {
+  for (const storeId of storeIds) {
+    const existingRunId = await readActiveRunId(redis, storeId);
+    if (!existingRunId) continue;
+    const existingRun = await getSyncRun(existingRunId);
+    if (existingRun && isOpenRun(existingRun)) {
+      return { run: existingRun, matchedStoreId: storeId };
+    }
+  }
+  return null;
+}
+
 async function saveMemoryRun(run: SyncRun) {
   memoryRuns.set(run.runId, run);
   if (run.activeBulkOperationId)
@@ -215,20 +258,21 @@ export async function createSyncRun({
   const storeId = getStoreId();
   const redis = await getRedis();
 
-  const existingRunId = redis
-    ? await redis.get(activeKey(storeId))
-    : memoryIdempotency.get(activeKey(storeId));
-  if (existingRunId) {
-    const existingRun = await getSyncRun(existingRunId);
-    if (existingRun && isOpenRun(existingRun)) {
-      return {
-        runId: existingRun.runId,
-        accepted: false,
-        status: "already_running",
-        modes: existingRun.requestedModes,
-        currentMode: existingRun.currentMode,
-      };
-    }
+  const activeRun = await findOpenActiveRun(redis, getStoreIdAliases());
+  if (activeRun) {
+    await mirrorActiveRunKey({
+      redis,
+      fromStoreId: activeRun.matchedStoreId,
+      toStoreId: storeId,
+      runId: activeRun.run.runId,
+    });
+    return {
+      runId: activeRun.run.runId,
+      accepted: false,
+      status: "already_running",
+      modes: activeRun.run.requestedModes,
+      currentMode: activeRun.run.currentMode,
+    };
   }
 
   const createdAt = nowIso();
@@ -545,10 +589,15 @@ export async function listOpenRuns(): Promise<SyncRun[]> {
     return Array.from(memoryRuns.values()).filter(isOpenRun);
   }
 
-  const activeRunId = await redis.get(activeKey(getStoreId()));
-  if (activeRunId) {
-    const activeRun = await getSyncRun(activeRunId);
-    if (activeRun && isOpenRun(activeRun)) return [activeRun];
+  const activeRun = await findOpenActiveRun(redis, getStoreIdAliases());
+  if (activeRun) {
+    await mirrorActiveRunKey({
+      redis,
+      fromStoreId: activeRun.matchedStoreId,
+      toStoreId: getStoreId(),
+      runId: activeRun.run.runId,
+    });
+    return [activeRun.run];
   }
 
   return (await scanSyncRuns({ redis, limit: SYNC_RUN_SCAN_LIMIT })).filter(
@@ -570,9 +619,16 @@ export async function getLatestSyncRun(
 ): Promise<SyncRun | null> {
   const redis = await getRedis();
   if (!redis) {
-    const activeRunId = memoryIdempotency.get(activeKey(storeId));
-    const activeRun = activeRunId ? memoryRuns.get(activeRunId) : null;
-    if (activeRun && isOpenRun(activeRun)) return activeRun;
+    const activeRun = await findOpenActiveRun(null, getStoreIdAliases());
+    if (activeRun) {
+      await mirrorActiveRunKey({
+        redis: null,
+        fromStoreId: activeRun.matchedStoreId,
+        toStoreId: storeId,
+        runId: activeRun.run.runId,
+      });
+      return activeRun.run;
+    }
 
     const latestRunId = memoryLatestRunByStore.get(storeId);
     const latestRun = latestRunId ? memoryRuns.get(latestRunId) : null;
@@ -583,10 +639,15 @@ export async function getLatestSyncRun(
     );
   }
 
-  const activeRunId = await redis.get(activeKey(storeId));
-  if (activeRunId) {
-    const activeRun = await getSyncRun(activeRunId);
-    if (activeRun && isOpenRun(activeRun)) return activeRun;
+  const activeRun = await findOpenActiveRun(redis, getStoreIdAliases());
+  if (activeRun) {
+    await mirrorActiveRunKey({
+      redis,
+      fromStoreId: activeRun.matchedStoreId,
+      toStoreId: storeId,
+      runId: activeRun.run.runId,
+    });
+    return activeRun.run;
   }
 
   const latestRunId = await redis.get(latestKey(storeId));
@@ -600,13 +661,14 @@ export async function getLatestSyncRun(
 
 export async function withSyncLock<T>(
   fn: (fencingToken: string) => Promise<T>,
+  storeId = getStoreId(),
 ): Promise<T | null> {
-  const token = await acquireSyncLock();
+  const token = await acquireSyncLock(storeId);
   if (!token) return null;
   try {
     return await fn(token);
   } finally {
-    await releaseSyncLock(token);
+    await releaseSyncLock(token, storeId);
   }
 }
 

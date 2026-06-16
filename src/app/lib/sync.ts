@@ -260,6 +260,16 @@ export async function continueSyncRun(
 ): Promise<SyncRun | null> {
   const startedAt = Date.now();
   logSyncEvent("sync_continue_requested", { runId, continuationSource });
+  const initialRun = await getSyncRun(runId);
+  if (!initialRun) {
+    logSyncEvent(
+      "sync_continue_run_missing",
+      { runId, continuationSource },
+      "warn",
+    );
+    return null;
+  }
+
   return await withSyncLock(async (fencingToken) => {
     const run = await getSyncRun(runId);
     if (!run) {
@@ -369,7 +379,7 @@ export async function continueSyncRun(
     });
     await sendSyncSuccessAlert({ run });
     return run;
-  });
+  }, initialRun.storeId);
 }
 
 async function startModeStep(mode: SyncMode): Promise<ModeStepOutcome> {
@@ -762,7 +772,9 @@ export async function enqueueBulkFinishNextContinuation(
     return null;
   }
 
-  const nextMessage = await enqueueSyncContinuation(result.nextContinuationPayload);
+  const nextMessage = await enqueueSyncContinuation(
+    result.nextContinuationPayload,
+  );
   await markPendingNextContinuationEnqueued({
     opId: result.completedOpId,
     qstashCorrelationId: nextMessage.correlationId,
@@ -865,7 +877,17 @@ export async function handleBulkOperationFinished({
     return noBulkFinishContinuation(null);
   }
 
-  const fencingToken = await acquireSyncLock();
+  const initialRun = await getSyncRun(runId);
+  if (!initialRun) {
+    logSyncEvent(
+      "sync_bulk_finish_run_missing",
+      { completionSource: source, runId, opId, opStatus: status },
+      "warn",
+    );
+    return noBulkFinishContinuation(null);
+  }
+
+  const fencingToken = await acquireSyncLock(initialRun.storeId);
   if (!fencingToken) {
     logSyncEvent(
       "sync_bulk_finish_lock_busy",
@@ -1021,7 +1043,7 @@ export async function handleBulkOperationFinished({
     });
     return noBulkFinishContinuation(run);
   } finally {
-    await releaseSyncLock(fencingToken);
+    await releaseSyncLock(fencingToken, initialRun.storeId);
   }
 }
 
