@@ -428,8 +428,45 @@ export async function fetchAllShopifyVariants() {
   return variants;
 }
 
+export type CostUpdateBulkMutationInput = {
+  inventoryItemId: string;
+  cost: number;
+};
+
+export const COST_UPDATE_BULK_MUTATION = `
+  mutation inventoryItemUpdate($id: ID!, $input: InventoryItemInput!) {
+    inventoryItemUpdate(id: $id, input: $input) {
+      inventoryItem {
+        id
+        unitCost {
+          amount
+        }
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+export function buildCostUpdateBulkMutationJsonl(
+  updates: CostUpdateBulkMutationInput[],
+): string {
+  return updates
+    .map((u) =>
+      JSON.stringify({
+        id: u.inventoryItemId,
+        input: {
+          cost: u.cost,
+        },
+      }),
+    )
+    .join("\n");
+}
+
 export async function runCostUpdateBulkMutation(
-  updates: { inventoryItemId: string; cost: number }[],
+  updates: CostUpdateBulkMutationInput[],
 ) {
   console.log(`Preparing bulk mutation for ${updates.length} cost updates.`);
   logSyncEvent("shopify_bulk_mutation_prepare", {
@@ -456,16 +493,7 @@ export async function runCostUpdateBulkMutation(
       }
     }
   `;
-  const jsonl = updates
-    .map((u) =>
-      JSON.stringify({
-        input: {
-          id: u.inventoryItemId,
-          cost: u.cost.toString(),
-        },
-      }),
-    )
-    .join("\n");
+  const jsonl = buildCostUpdateBulkMutationJsonl(updates);
 
   const stagedUploadsInput = {
     input: [
@@ -521,20 +549,7 @@ export async function runCostUpdateBulkMutation(
   });
 
   // 3. Run the bulk mutation
-  const bulkMutationQuery = `
-    mutation inventoryItemUpdate($input: InventoryItemInput!) {
-      inventoryItemUpdate(input: $input) {
-        inventoryItem {
-          id
-          cost
-        }
-        userErrors {
-          field
-          message
-        }
-      }
-    }
-  `;
+  const bulkMutationQuery = COST_UPDATE_BULK_MUTATION;
 
   const bulkOperationRunMutation = `
     mutation bulkOperationRunMutation($mutation: String!, $stagedUploadPath: String!) {

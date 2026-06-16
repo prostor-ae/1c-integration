@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildCostUpdateBulkMutationJsonl,
   buildPriceUpdateBulkMutationJsonl,
   buildVariantIdentifierSearchQuery,
   callShopify,
+  COST_UPDATE_BULK_MUTATION,
   describeShopifyError,
   getShopifyLogContext,
   normalizeShopifyDomain,
@@ -290,6 +292,50 @@ test("price bulk mutation uses productVariantsBulkUpdate variables", () => {
       ],
     },
   ]);
+});
+
+test("cost bulk mutation uses inventoryItemUpdate id and input variables", () => {
+  assert.match(COST_UPDATE_BULK_MUTATION, /inventoryItemUpdate/);
+  assert.match(COST_UPDATE_BULK_MUTATION, /\$id: ID!/);
+  assert.match(COST_UPDATE_BULK_MUTATION, /\$input: InventoryItemInput!/);
+  assert.match(
+    COST_UPDATE_BULK_MUTATION,
+    /inventoryItemUpdate\(id: \$id, input: \$input\)/,
+  );
+  assert.match(COST_UPDATE_BULK_MUTATION, /unitCost\s*\{\s*amount\s*\}/);
+  assert.doesNotMatch(
+    COST_UPDATE_BULK_MUTATION,
+    /inventoryItemUpdate\(input: \$input\)/,
+  );
+  assert.doesNotMatch(COST_UPDATE_BULK_MUTATION, /\n\s*cost\s*\n/);
+
+  const jsonl = buildCostUpdateBulkMutationJsonl([
+    {
+      inventoryItemId: "gid://shopify/InventoryItem/1",
+      cost: 12.34,
+    },
+    {
+      inventoryItemId: "gid://shopify/InventoryItem/2",
+      cost: 20,
+    },
+  ]);
+
+  const rows = jsonl.split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(rows, [
+    {
+      id: "gid://shopify/InventoryItem/1",
+      input: {
+        cost: 12.34,
+      },
+    },
+    {
+      id: "gid://shopify/InventoryItem/2",
+      input: {
+        cost: 20,
+      },
+    },
+  ]);
+  assert.equal("id" in rows[0].input, false);
 });
 
 test("product weight helpers parse positive decimal kg values and fallback on invalid values", () => {
