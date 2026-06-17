@@ -3,7 +3,7 @@ import {
   getWebhookIdempotencyValue,
   parseBulkOperationWebhook,
   recordWebhookIdempotency,
-  verifyShopifyWebhookHmac,
+  verifyShopifyWebhookHmacWithDiagnostics,
 } from "@/app/lib/shopify-webhooks";
 import { logSyncEvent } from "@/app/lib/sync-logging";
 import {
@@ -21,14 +21,29 @@ export async function POST(request: Request) {
   const hmac = request.headers.get("x-shopify-hmac-sha256");
   const topic =
     request.headers.get("x-shopify-topic") || "bulk_operations/finish";
+  const shopDomainHeader = request.headers.get("x-shopify-shop-domain");
+  const hmacVerification = verifyShopifyWebhookHmacWithDiagnostics(
+    rawBody,
+    hmac,
+    { shopDomainHeader },
+  );
 
-  if (!verifyShopifyWebhookHmac(rawBody, hmac)) {
+  if (!hmacVerification.ok) {
     logSyncEvent(
       "shopify_bulk_webhook_rejected",
       {
         reason: "invalid_hmac",
+        hmacFailureReason: hmacVerification.reason,
         topic,
         hasHmac: Boolean(hmac),
+        shopDomainHeader: hmacVerification.shopDomainHeader,
+        webhookSecretTarget: hmacVerification.webhookSecretTarget,
+        webhookSecretTargetSource: hmacVerification.webhookSecretTargetSource,
+        webhookSecretCandidateSources: hmacVerification.candidateSecretSources,
+        webhookSecretConfiguredSources:
+          hmacVerification.configuredSecretSources,
+        hmacHeaderLength: hmacVerification.hmacHeaderLength,
+        rawBodyBytes: hmacVerification.rawBodyBytes,
         durationMs: Date.now() - startedAt,
       },
       "warn",
@@ -48,6 +63,8 @@ export async function POST(request: Request) {
       {
         reason: "invalid_json",
         topic,
+        shopDomainHeader: hmacVerification.shopDomainHeader,
+        webhookSecretMatchedSource: hmacVerification.matchedSecretSource,
         durationMs: Date.now() - startedAt,
       },
       "warn",
@@ -68,6 +85,8 @@ export async function POST(request: Request) {
         topic,
         opId,
         opStatus: status,
+        shopDomainHeader: hmacVerification.shopDomainHeader,
+        webhookSecretMatchedSource: hmacVerification.matchedSecretSource,
         durationMs: Date.now() - startedAt,
       },
       "warn",
@@ -88,6 +107,8 @@ export async function POST(request: Request) {
       topic,
       opId,
       opStatus: status,
+      shopDomainHeader: hmacVerification.shopDomainHeader,
+      webhookSecretMatchedSource: hmacVerification.matchedSecretSource,
       qstashCorrelationId: existingDelivery,
       durationMs: Date.now() - startedAt,
     });
@@ -111,6 +132,8 @@ export async function POST(request: Request) {
         topic,
         opId,
         opStatus: status,
+        shopDomainHeader: hmacVerification.shopDomainHeader,
+        webhookSecretMatchedSource: hmacVerification.matchedSecretSource,
         error: message,
         durationMs: Date.now() - startedAt,
       },
@@ -141,6 +164,8 @@ export async function POST(request: Request) {
     opId,
     opStatus: status,
     errorCode: payload.error_code ?? null,
+    shopDomainHeader: hmacVerification.shopDomainHeader,
+    webhookSecretMatchedSource: hmacVerification.matchedSecretSource,
     durationMs,
     firstDelivery,
     qstashCorrelationId: enqueueResult.correlationId,

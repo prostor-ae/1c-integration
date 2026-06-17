@@ -20,25 +20,28 @@ All secrets live in **Vercel project environment variables** (per environment: p
 
 Rotation is **manual**: rotate the value in the Vercel UI for the affected environment, then trigger a redeploy so the new value reaches the running functions.
 
-| Env var                     | Where it lives                   | Rotation procedure                                                 |
-| --------------------------- | -------------------------------- | ------------------------------------------------------------------ |
-| `SHOPIFY_STORE_DOMAIN`      | Vercel project envs (per env)    | Rotate in Vercel UI, redeploy                                      |
-| `SHOPIFY_ADMIN_TOKEN`       | Vercel project envs (per env)    | Rotate in Shopify admin, update in Vercel UI, redeploy             |
-| `SHOPIFY_TARGET`            | Vercel project envs (per env)    | Set to `test` or `production`; redeploy after changing             |
-| `SHOPIFY_FORCE_TEST`        | Legacy Vercel project env        | Optional legacy boolean. Prefer `SHOPIFY_TARGET`                   |
-| `SHOPIFY_STORE_DOMAIN_TEST` | Vercel project envs (per env)    | Rotate in Vercel UI, redeploy                                      |
-| `SHOPIFY_ADMIN_TOKEN_TEST`  | Vercel project envs (per env)    | Rotate in Shopify admin (test shop), update in Vercel UI, redeploy |
-| `INTERNAL_API_KEY`          | Vercel project envs (per env)    | Rotate in Vercel UI, redeploy, update any caller                   |
-| `ONE_C_USERNAME`            | Vercel project envs (per env)    | Rotate in 1C, update in Vercel UI, redeploy                        |
-| `ONE_C_PASSWORD`            | Vercel project envs (per env)    | Rotate in 1C, update in Vercel UI, redeploy                        |
-| `ONE_C_PRICES_URL`          | Vercel project envs (per env)    | Update in Vercel UI, redeploy                                      |
-| `ONE_C_DISCOUNTS_URL`       | Vercel project envs (per env)    | Update in Vercel UI, redeploy                                      |
-| `ONE_C_STOCK_URL`           | Vercel project envs (per env)    | Update in Vercel UI, redeploy                                      |
-| `ONE_C_URL_1`               | Vercel project envs (per env)    | Update in Vercel UI, redeploy                                      |
-| `ONE_C_URL_2`               | Vercel project envs (per env)    | Update in Vercel UI, redeploy                                      |
-| `RESEND_API_KEY`            | Vercel project envs (per env)    | Rotate in Resend dashboard, update in Vercel UI, redeploy          |
-| `CRON_SECRET`               | Vercel project envs (production) | Rotate in Vercel UI, redeploy                                      |
-| `API_VERSION` (optional)    | Vercel project envs (per env)    | Update in Vercel UI, redeploy. Defaults to `2024-07` if unset.     |
+| Env var                             | Where it lives                   | Rotation procedure                                                 |
+| ----------------------------------- | -------------------------------- | ------------------------------------------------------------------ |
+| `SHOPIFY_STORE_DOMAIN`              | Vercel project envs (per env)    | Rotate in Vercel UI, redeploy                                      |
+| `SHOPIFY_ADMIN_TOKEN`               | Vercel project envs (per env)    | Rotate in Shopify admin, update in Vercel UI, redeploy             |
+| `SHOPIFY_TARGET`                    | Vercel project envs (per env)    | Set to `test` or `production`; redeploy after changing             |
+| `SHOPIFY_FORCE_TEST`                | Legacy Vercel project env        | Optional legacy boolean. Prefer `SHOPIFY_TARGET`                   |
+| `SHOPIFY_WEBHOOK_SECRET`            | Vercel project envs (per env)    | Legacy/default Shopify app API secret key for webhook HMAC         |
+| `SHOPIFY_WEBHOOK_SECRET_TEST`       | Vercel project envs (per env)    | Test Shopify app API secret key for webhook HMAC                   |
+| `SHOPIFY_WEBHOOK_SECRET_PRODUCTION` | Vercel project envs (per env)    | Production Shopify app API secret key for webhook HMAC             |
+| `SHOPIFY_STORE_DOMAIN_TEST`         | Vercel project envs (per env)    | Rotate in Vercel UI, redeploy                                      |
+| `SHOPIFY_ADMIN_TOKEN_TEST`          | Vercel project envs (per env)    | Rotate in Shopify admin (test shop), update in Vercel UI, redeploy |
+| `INTERNAL_API_KEY`                  | Vercel project envs (per env)    | Rotate in Vercel UI, redeploy, update any caller                   |
+| `ONE_C_USERNAME`                    | Vercel project envs (per env)    | Rotate in 1C, update in Vercel UI, redeploy                        |
+| `ONE_C_PASSWORD`                    | Vercel project envs (per env)    | Rotate in 1C, update in Vercel UI, redeploy                        |
+| `ONE_C_PRICES_URL`                  | Vercel project envs (per env)    | Update in Vercel UI, redeploy                                      |
+| `ONE_C_DISCOUNTS_URL`               | Vercel project envs (per env)    | Update in Vercel UI, redeploy                                      |
+| `ONE_C_STOCK_URL`                   | Vercel project envs (per env)    | Update in Vercel UI, redeploy                                      |
+| `ONE_C_URL_1`                       | Vercel project envs (per env)    | Update in Vercel UI, redeploy                                      |
+| `ONE_C_URL_2`                       | Vercel project envs (per env)    | Update in Vercel UI, redeploy                                      |
+| `RESEND_API_KEY`                    | Vercel project envs (per env)    | Rotate in Resend dashboard, update in Vercel UI, redeploy          |
+| `CRON_SECRET`                       | Vercel project envs (production) | Rotate in Vercel UI, redeploy                                      |
+| `API_VERSION` (optional)            | Vercel project envs (per env)    | Update in Vercel UI, redeploy. Defaults to `2024-07` if unset.     |
 
 Alert emails are hardcoded in `src/app/lib/alerts.ts` to send from `notification@morlavi92.uk` to `chepiga.lev@gmail.com`; no `ALERT_FROM` or `ALERT_RECIPIENTS` environment variables are required.
 
@@ -187,7 +190,10 @@ Required production infrastructure:
 - `SHOPIFY_API_VERSION=2026-04`.
 - `CRON_SECRET` for Vercel Cron authentication. Vercel sends it as
   `Authorization: Bearer <CRON_SECRET>` when invoking cron routes.
-- `SHOPIFY_WEBHOOK_SECRET` (or `SHOPIFY_API_SECRET_KEY` / `SHOPIFY_CLIENT_SECRET`) for Shopify HMAC verification.
+- Shopify webhook HMAC verification uses target-specific app API secret keys when configured:
+  `SHOPIFY_WEBHOOK_SECRET_TEST` for the test shop and
+  `SHOPIFY_WEBHOOK_SECRET_PRODUCTION` for the production shop. The legacy
+  `SHOPIFY_WEBHOOK_SECRET` (or `SHOPIFY_API_SECRET_KEY` / `SHOPIFY_CLIENT_SECRET`) remains a fallback.
 - Register Shopify `bulk_operations/finish` webhook to `/api/webhooks/shopify/bulk-operations` on the **effective** Shopify target. The app defaults to the test target for backward-compatible safety unless `SHOPIFY_TARGET=production` or `SHOPIFY_FORCE_TEST=false` is configured. Use `node scripts/register-shopify-webhook.mjs --target=test` for test, `--target=production` for production, or `--target=both` when both shops are intentionally active.
 
 Operational model:
@@ -205,6 +211,7 @@ Useful Vercel log events:
 - `shopify_bulk_mutation_jsonl_uploaded` — staged JSONL upload to Shopify succeeded.
 - `shopify_bulk_mutation_started` / `sync_mode_waiting_bulk` — Shopify accepted the bulk mutation and the run is waiting for Shopify completion.
 - `shopify_bulk_webhook_enqueued` — Shopify sent a bulk-operation finish webhook and the app enqueued QStash processing. If this marker is missing for a completed bulk operation, the webhook was not accepted/enqueued for that shop.
+- `shopify_bulk_webhook_rejected` with `reason: "invalid_hmac"` now includes secret-safe diagnostics such as `shopDomainHeader`, `webhookSecretTarget`, `webhookSecretCandidateSources`, `webhookSecretConfiguredSources`, `hmacHeaderLength`, and `rawBodyBytes`. It never logs secret values.
 - `sync_bulk_operation_completed` — the app processed a completed Shopify bulk operation, marked the mode applied, and either scheduled the next mode or completed the run.
 - `sync_run_completed` — all requested modes finished.
 - `sync_reconcile_*` — reconcile cron inspected/continued a stuck or missed run.
