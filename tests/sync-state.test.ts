@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { test, beforeEach } from "node:test";
-import { continueSyncRun } from "../src/app/lib/sync";
+import {
+  buildPriceUpdateTargetFromOneC,
+  continueSyncRun,
+} from "../src/app/lib/sync";
 import { canonicalizeModes } from "../src/app/lib/sync-types";
 import {
   __resetMemorySyncStateForTests,
@@ -26,6 +29,53 @@ beforeEach(() => {
 test("canonicalizeModes preserves costs -> prices -> stock subset order", () => {
   assert.deepEqual(canonicalizeModes(["stock", "costs"]), ["costs", "stock"]);
   assert.deepEqual(canonicalizeModes(["stock", "prices"]), ["prices", "stock"]);
+});
+
+test("price sync target uses 1C prices as final price and discounts as compare-at price", () => {
+  assert.deepEqual(
+    buildPriceUpdateTargetFromOneC({
+      priceRaw: 5.6,
+      compareAtRaw: 7,
+      weightKg: null,
+    }),
+    { price: "5.60", compareAtPrice: "7.00" },
+  );
+
+  assert.deepEqual(
+    buildPriceUpdateTargetFromOneC({
+      priceRaw: 20,
+      compareAtRaw: undefined,
+      weightKg: null,
+    }),
+    { price: "20.00", compareAtPrice: null },
+  );
+
+  assert.deepEqual(
+    buildPriceUpdateTargetFromOneC({
+      priceRaw: 20,
+      compareAtRaw: 20,
+      weightKg: null,
+    }),
+    { price: "20.00", compareAtPrice: null },
+  );
+
+  assert.deepEqual(
+    buildPriceUpdateTargetFromOneC({
+      priceRaw: 20,
+      compareAtRaw: 30,
+      weightKg: 0.5,
+    }),
+    { price: "10.00", compareAtPrice: "15.00" },
+  );
+
+  assert.equal(
+    buildPriceUpdateTargetFromOneC({
+      priceRaw: 0,
+      compareAtRaw: 30,
+      weightKg: null,
+    }),
+    null,
+  );
 });
 
 test("createSyncRun returns existing active run instead of starting parallel run", async () => {

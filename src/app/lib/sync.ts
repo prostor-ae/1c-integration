@@ -85,6 +85,26 @@ type ModeStepOutcome =
       proposed: number;
     };
 
+export function buildPriceUpdateTargetFromOneC({
+  priceRaw,
+  compareAtRaw,
+  weightKg,
+}: {
+  priceRaw: unknown;
+  compareAtRaw: unknown;
+  weightKg: number | null;
+}): { price: string; compareAtPrice: string | null } | null {
+  if (!isSyncableOneCPrice(priceRaw)) return null;
+
+  const finalPrice = applyShopifyWeight(Number(priceRaw), weightKg);
+  const price = Number(finalPrice).toFixed(2);
+  const compareAtPrice = isSyncableOneCDiscount(compareAtRaw, priceRaw)
+    ? Number(applyShopifyWeight(Number(compareAtRaw), weightKg)).toFixed(2)
+    : null;
+
+  return { price, compareAtPrice };
+}
+
 function tryParsePriorBulkOpActive(err: any): PriorBulkOpActivePayload | null {
   const msg = err?.message;
   if (typeof msg !== "string") return null;
@@ -579,21 +599,18 @@ async function startPricesModeStep(): Promise<ModeStepOutcome> {
         return;
       }
 
-      const price = applyShopifyWeight(Number(priceRaw), product.weightKg);
-      const priceStr = Number(price).toFixed(2);
-      const discountRaw = discounts1c[variant.barcode];
-      const hasValidDiscount = isSyncableOneCDiscount(discountRaw, priceRaw);
-      const newPrice = hasValidDiscount
-        ? Number(
-            applyShopifyWeight(Number(discountRaw), product.weightKg),
-          ).toFixed(2)
-        : priceStr;
-      const newCompareAtPrice: string | null = hasValidDiscount
-        ? priceStr
-        : null;
+      const compareAtRaw = discounts1c[variant.barcode];
+      const target = buildPriceUpdateTargetFromOneC({
+        priceRaw,
+        compareAtRaw,
+        weightKg: product.weightKg,
+      });
+      if (!target) return;
+      const newPrice = target.price;
+      const newCompareAtPrice = target.compareAtPrice;
 
       if (
-        (discountRaw === undefined || discountRaw === null) &&
+        (compareAtRaw === undefined || compareAtRaw === null) &&
         variant.compareAtPrice !== null
       ) {
         discountRemovedCount += 1;

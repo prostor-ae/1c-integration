@@ -916,15 +916,15 @@ function buildPriceDifferences(
     if (price === undefined) return;
     if (!isSyncableOneCPrice(price)) return;
 
-    const discount = discounts[barcode];
+    const compareAtPrice = discounts[barcode];
     variants.forEach((variant) => {
       const weightedPrice = applyShopifyWeight(price, variant.weightKg);
       const priceStr = money(weightedPrice);
-      const hasValidDiscount = isSyncableOneCDiscount(discount, price);
-      const expectedPrice = hasValidDiscount
-        ? money(applyShopifyWeight(Number(discount), variant.weightKg))
-        : priceStr;
-      const expectedCompareAtPrice = hasValidDiscount ? priceStr : null;
+      const hasValidDiscount = isSyncableOneCDiscount(compareAtPrice, price);
+      const expectedPrice = priceStr;
+      const expectedCompareAtPrice = hasValidDiscount
+        ? money(applyShopifyWeight(Number(compareAtPrice), variant.weightKg))
+        : null;
       const currentPrice = moneyOrNull(variant.price);
       const currentCompareAtPrice = moneyOrNull(variant.compareAtPrice);
       if (
@@ -947,7 +947,7 @@ function buildPriceDifferences(
           },
           oneC: {
             price,
-            discount: hasValidDiscount ? Number(discount) : null,
+            discount: hasValidDiscount ? Number(compareAtPrice) : null,
           },
         });
       }

@@ -183,7 +183,7 @@ export async function sendEmptyPayloadAlert({
 }): Promise<void> {
   const subject = `[1c-integration] 1C payload empty (${mode}/${source})`;
   const body = [
-    `The 1C endpoint for ${source} returned an empty Items map. The ${mode} mode was skipped.`,
+    `The 1C endpoint for ${source} returned an empty or missing Items map. The ${mode} mode was skipped.`,
     ``,
     `Mode:    ${mode}`,
     `Source:  ${source}`,

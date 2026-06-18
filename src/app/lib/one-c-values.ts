@@ -9,17 +9,17 @@ export function isSyncableOneCPrice(value: unknown): boolean {
 }
 
 export function isSyncableOneCDiscount(
-  discount: unknown,
-  basePrice: unknown,
+  compareAtPrice: unknown,
+  finalPrice: unknown,
 ): boolean {
-  const discountNumber = toFiniteOneCNumber(discount);
-  const basePriceNumber = toFiniteOneCNumber(basePrice);
+  const compareAtPriceNumber = toFiniteOneCNumber(compareAtPrice);
+  const finalPriceNumber = toFiniteOneCNumber(finalPrice);
 
   return (
-    discountNumber !== null &&
-    basePriceNumber !== null &&
-    discountNumber > 0 &&
-    basePriceNumber > 0 &&
-    discountNumber < basePriceNumber
+    compareAtPriceNumber !== null &&
+    finalPriceNumber !== null &&
+    compareAtPriceNumber > 0 &&
+    finalPriceNumber > 0 &&
+    compareAtPriceNumber > finalPriceNumber
   );
 }

@@ -114,8 +114,8 @@ test("buildDiffReport reports Shopify test-store drift and barcode data gaps", (
       },
     ],
     oneC: {
-      prices: { "111": 12, dup: 2 },
-      discounts: { "111": 9, "333": 1 },
+      prices: { "111": 9, dup: 2 },
+      discounts: { "111": 12, "333": 1 },
       stock: { "111": 1, "222": 0, "999": 5 },
       alqitharaCosts: { "111": 4, "333": 7 },
       localCosts: { "111": 6 },
@@ -132,7 +132,7 @@ test("buildDiffReport reports Shopify test-store drift and barcode data gaps", (
     sku: "SHIRT",
     current: { price: "10.00", compareAtPrice: null },
     expected: { price: "9.00", compareAtPrice: "12.00" },
-    oneC: { price: 12, discount: 9 },
+    oneC: { price: 9, discount: 12 },
   });
 
   assert.equal(report.summary.stockStatusDifferences, 1);
@@ -158,7 +158,7 @@ test("buildDiffReport reports Shopify test-store drift and barcode data gaps", (
   assert.equal(report.summary.discountBarcodesWithoutBasePrice, 1);
   assert.equal(report.summary.oneCBarcodesMissingInShopify, 3);
   assert.equal(report.summary.invalidOneCValues, 1);
-  assert.equal(report.summary.totalDifferences, 11);
+  assert.equal(report.summary.totalDifferences, 7);
 
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "shopify-1c-diff-test-"));
   try {
@@ -193,7 +193,7 @@ test("buildDiffReport reports Shopify test-store drift and barcode data gaps", (
     const overviewJson = JSON.parse(
       fs.readFileSync(path.join(tempDir, "json", "overview.json"), "utf8"),
     );
-    assert.equal(overviewJson.summary.totalDifferences, 11);
+    assert.equal(overviewJson.summary.totalDifferences, 7);
     assert.ok(overviewJson.jsonDirectory.endsWith("/json"));
     assert.ok(overviewJson.csvDirectory.endsWith("/csv"));
     assert.ok(overviewJson.excelDirectory.endsWith("/excel"));
@@ -273,8 +273,8 @@ test("buildDiffReport applies product custom.weight to 1C prices, discounts, and
       },
     ],
     oneC: {
-      prices: { "W-1": 30 },
-      discounts: { "W-1": 20 },
+      prices: { "W-1": 20 },
+      discounts: { "W-1": 30 },
       stock: {},
       alqitharaCosts: { "W-1": 30 },
       localCosts: {},
@@ -289,6 +289,86 @@ test("buildDiffReport applies product custom.weight to 1C prices, discounts, and
   });
   assert.equal(report.summary.costDifferences, 1);
   assert.equal(report.differences.costs[0].expectedCost, "15.00");
+});
+
+test("buildDiffReport treats 1C discounts as compare-at prices and clears absent discounts", () => {
+  const report = buildDiffReport({
+    generatedAt: "2026-06-18T00:00:00.000Z",
+    shopifyDomain: "test-shop.myshopify.com",
+    apiVersion: "2026-04",
+    modes: ["prices"],
+    products: [
+      {
+        id: "gid://shopify/Product/discounted",
+        handle: "discounted",
+        title: "Discounted",
+        status: "ACTIVE",
+        weightKg: null,
+        variantsTruncated: false,
+        variants: [
+          {
+            id: "gid://shopify/ProductVariant/discounted",
+            title: null,
+            sku: "DISCOUNTED",
+            barcode: "4607065580261",
+            price: "5.60",
+            compareAtPrice: null,
+            inventoryItem: null,
+          },
+        ],
+      },
+      {
+        id: "gid://shopify/Product/stale",
+        handle: "stale-discount",
+        title: "Stale Discount",
+        status: "ACTIVE",
+        weightKg: null,
+        variantsTruncated: false,
+        variants: [
+          {
+            id: "gid://shopify/ProductVariant/stale",
+            title: null,
+            sku: "STALE",
+            barcode: "STALE",
+            price: "20.00",
+            compareAtPrice: "25.00",
+            inventoryItem: null,
+          },
+        ],
+      },
+    ],
+    oneC: {
+      prices: { "4607065580261": 5.6, STALE: 20 },
+      discounts: { "4607065580261": 7 },
+      stock: {},
+      alqitharaCosts: {},
+      localCosts: {},
+      invalidValues: [],
+    },
+  });
+
+  assert.deepEqual(
+    report.differences.prices.map((row) => ({
+      barcode: row.barcode,
+      current: row.current,
+      expected: row.expected,
+      oneC: row.oneC,
+    })),
+    [
+      {
+        barcode: "4607065580261",
+        current: { price: "5.60", compareAtPrice: null },
+        expected: { price: "5.60", compareAtPrice: "7.00" },
+        oneC: { price: 5.6, discount: 7 },
+      },
+      {
+        barcode: "STALE",
+        current: { price: "20.00", compareAtPrice: "25.00" },
+        expected: { price: "20.00", compareAtPrice: null },
+        oneC: { price: 20, discount: null },
+      },
+    ],
+  );
 });
 
 test("buildDiffReport highlights non-positive 1C prices without proposing a zero-price update", () => {
