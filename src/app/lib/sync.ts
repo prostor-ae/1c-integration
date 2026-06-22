@@ -50,7 +50,11 @@ import {
 } from "./sync-state";
 import { logSyncEvent, summarizeSyncRun } from "./sync-logging";
 import { applyShopifyWeight } from "./product-weight";
-import { isSyncableOneCDiscount, isSyncableOneCPrice } from "./one-c-values";
+import {
+  isActiveOneCStockAmount,
+  isSyncableOneCDiscount,
+  isSyncableOneCPrice,
+} from "./one-c-values";
 import {
   enqueueSyncContinuation,
   isSyncContinuationConfigError,
@@ -103,6 +107,55 @@ export function buildPriceUpdateTargetFromOneC({
     : null;
 
   return { price, compareAtPrice };
+}
+
+export type StockStatusUpdate = { productId: string; status: "ACTIVE" | "DRAFT" };
+
+export type StockStatusDiff = {
+  updates: StockStatusUpdate[];
+  currentlyActive: number;
+  proposedDraftFlips: number;
+  flippedToDraftSamples: ShopifyProductInfo[];
+};
+
+export function buildStockStatusDiff(
+  products: Map<string, ShopifyProductInfo>,
+  stock1c: Record<string, unknown>,
+): StockStatusDiff {
+  const updates: StockStatusUpdate[] = [];
+  let currentlyActive = 0;
+  let proposedDraftFlips = 0;
+  const flippedToDraftSamples: ShopifyProductInfo[] = [];
+
+  products.forEach((product) => {
+    if (product.status === "ACTIVE") currentlyActive += 1;
+
+    let productInStock = false;
+    for (const variant of product.variants) {
+      if (!variant.barcode) continue;
+      if (isActiveOneCStockAmount(stock1c[variant.barcode])) {
+        productInStock = true;
+        break;
+      }
+    }
+
+    const newStatus: "ACTIVE" | "DRAFT" = productInStock ? "ACTIVE" : "DRAFT";
+    if (newStatus !== product.status) {
+      updates.push({ productId: product.id, status: newStatus });
+      if (product.status === "ACTIVE" && newStatus === "DRAFT") {
+        proposedDraftFlips += 1;
+        if (flippedToDraftSamples.length < 25)
+          flippedToDraftSamples.push(product);
+      }
+    }
+  });
+
+  return {
+    updates,
+    currentlyActive,
+    proposedDraftFlips,
+    flippedToDraftSamples,
+  };
 }
 
 function tryParsePriorBulkOpActive(err: any): PriorBulkOpActivePayload | null {
@@ -686,34 +739,12 @@ async function startStockModeStep(): Promise<ModeStepOutcome> {
   }
 
   const products = await fetchAllShopifyProductsAndVariants();
-  const updates: { productId: string; status: "ACTIVE" | "DRAFT" }[] = [];
-  let currentlyActive = 0;
-  let proposedDraftFlips = 0;
-  const flippedToDraftSamples: ShopifyProductInfo[] = [];
-
-  products.forEach((product) => {
-    if (product.status === "ACTIVE") currentlyActive += 1;
-
-    let productInStock = false;
-    for (const variant of product.variants) {
-      if (!variant.barcode) continue;
-      const stockBalance = stock1c[variant.barcode];
-      if (stockBalance !== undefined && stockBalance > 0) {
-        productInStock = true;
-        break;
-      }
-    }
-
-    const newStatus: "ACTIVE" | "DRAFT" = productInStock ? "ACTIVE" : "DRAFT";
-    if (newStatus !== product.status) {
-      updates.push({ productId: product.id, status: newStatus });
-      if (product.status === "ACTIVE" && newStatus === "DRAFT") {
-        proposedDraftFlips += 1;
-        if (flippedToDraftSamples.length < 25)
-          flippedToDraftSamples.push(product);
-      }
-    }
-  });
+  const {
+    updates,
+    currentlyActive,
+    proposedDraftFlips,
+    flippedToDraftSamples,
+  } = buildStockStatusDiff(products, stock1c);
 
   logSyncEvent("sync_mode_diff_computed", {
     mode: "stock",

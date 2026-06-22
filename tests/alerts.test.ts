@@ -3,6 +3,7 @@ import { afterEach, test } from "node:test";
 import {
   ALERT_EMAIL_FROM,
   ALERT_EMAIL_RECIPIENT,
+  ALERT_EMAIL_RECIPIENTS,
   sendAlert,
 } from "../src/app/lib/alerts";
 
@@ -13,6 +14,10 @@ afterEach(() => {
 test("alert emails use the hardcoded Resend sender and recipient", () => {
   assert.equal(ALERT_EMAIL_FROM, "notification@morlavi92.uk");
   assert.equal(ALERT_EMAIL_RECIPIENT, "chepiga.lev@gmail.com");
+  assert.deepEqual(ALERT_EMAIL_RECIPIENTS, [
+    "chepiga.lev@gmail.com",
+    "sergei.vasilev@alqithara.ae",
+  ]);
 });
 
 test("alert emails no longer require sender or recipient environment variables", async () => {

@@ -18,6 +18,10 @@ export type MissingBarcodeAlertArgs = {
 
 export const ALERT_EMAIL_FROM = "notification@morlavi92.uk";
 export const ALERT_EMAIL_RECIPIENT = "chepiga.lev@gmail.com";
+export const ALERT_EMAIL_RECIPIENTS = [
+  ALERT_EMAIL_RECIPIENT,
+  "sergei.vasilev@alqithara.ae",
+];
 const MISSING_BARCODE_ALERT_SAMPLE_LIMIT = 25;
 
 function getResendConfig(): {
@@ -34,11 +38,14 @@ function getResendConfig(): {
   return {
     apiKey,
     from: ALERT_EMAIL_FROM,
-    recipients: [ALERT_EMAIL_RECIPIENT],
+    recipients: ALERT_EMAIL_RECIPIENTS,
   };
 }
 
-export async function sendAlert({ subject, body }: SendAlertArgs): Promise<void> {
+export async function sendAlert({
+  subject,
+  body,
+}: SendAlertArgs): Promise<void> {
   try {
     const { apiKey, from, recipients } = getResendConfig();
     const resend = new Resend(apiKey);
@@ -54,7 +61,7 @@ export async function sendAlert({ subject, body }: SendAlertArgs): Promise<void>
         event: "alert_send_failed",
         subject,
         error: error?.message ?? String(error),
-      })
+      }),
     );
   }
 }
@@ -70,9 +77,7 @@ export async function sendMissingBarcodeAlert({
 }: MissingBarcodeAlertArgs): Promise<void> {
   const sample = unknownBarcodes.slice(0, MISSING_BARCODE_ALERT_SAMPLE_LIMIT);
   const hiddenCount = Math.max(unknownBarcodes.length - sample.length, 0);
-  const sampleLines = sample
-    .map((barcode) => `  - ${barcode}`)
-    .join("\n");
+  const sampleLines = sample.map((barcode) => `  - ${barcode}`).join("\n");
 
   const subject = `[1c-integration] 1C webhook unknown Shopify barcodes (${unknown})`;
   const body = [

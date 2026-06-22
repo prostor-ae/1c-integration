@@ -371,6 +371,71 @@ test("buildDiffReport treats 1C discounts as compare-at prices and clears absent
   );
 });
 
+test("buildDiffReport expects ACTIVE only for stock amounts above 0.1", () => {
+  const report = buildDiffReport({
+    generatedAt: "2026-05-08T00:00:00.000Z",
+    shopifyDomain: "test-shop.myshopify.com",
+    apiVersion: "2026-04",
+    modes: ["stock"],
+    products: [
+      {
+        id: "gid://shopify/Product/at-threshold",
+        handle: "at-threshold",
+        title: "At Threshold",
+        status: "ACTIVE",
+        variantsTruncated: false,
+        variants: [
+          {
+            id: "gid://shopify/ProductVariant/at-threshold",
+            title: null,
+            sku: "AT",
+            barcode: "AT",
+            price: "10.00",
+            compareAtPrice: null,
+            inventoryItem: null,
+          },
+        ],
+      },
+      {
+        id: "gid://shopify/Product/above-threshold",
+        handle: "above-threshold",
+        title: "Above Threshold",
+        status: "DRAFT",
+        variantsTruncated: false,
+        variants: [
+          {
+            id: "gid://shopify/ProductVariant/above-threshold",
+            title: null,
+            sku: "ABOVE",
+            barcode: "ABOVE",
+            price: "10.00",
+            compareAtPrice: null,
+            inventoryItem: null,
+          },
+        ],
+      },
+    ],
+    oneC: {
+      prices: {},
+      discounts: {},
+      stock: { AT: 0.1, ABOVE: 0.11 },
+      alqitharaCosts: {},
+      localCosts: {},
+      invalidValues: [],
+    },
+  });
+
+  assert.deepEqual(
+    report.differences.stockStatuses.map((row) => ({
+      handle: row.productHandle,
+      expectedStatus: row.expectedStatus,
+    })),
+    [
+      { handle: "above-threshold", expectedStatus: "ACTIVE" },
+      { handle: "at-threshold", expectedStatus: "DRAFT" },
+    ],
+  );
+});
 test("buildDiffReport highlights non-positive 1C prices without proposing a zero-price update", () => {
   const report = buildDiffReport({
     generatedAt: "2026-05-08T00:00:00.000Z",

@@ -23,3 +23,10 @@ export function isSyncableOneCDiscount(
     compareAtPriceNumber > finalPriceNumber
   );
 }
+
+export const ONE_C_STOCK_ACTIVE_THRESHOLD = 0.1;
+
+export function isActiveOneCStockAmount(value: unknown): boolean {
+  const numeric = toFiniteOneCNumber(value);
+  return numeric !== null && numeric > ONE_C_STOCK_ACTIVE_THRESHOLD;
+}

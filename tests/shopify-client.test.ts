@@ -17,6 +17,7 @@ import {
   parseShopifyWeightMetafieldKg,
 } from "../src/app/lib/product-weight";
 import {
+  isActiveOneCStockAmount,
   isSyncableOneCDiscount,
   isSyncableOneCPrice,
 } from "../src/app/lib/one-c-values";
@@ -417,4 +418,15 @@ test("1C price helpers treat non-positive prices and invalid compare-at prices a
   assert.equal(isSyncableOneCDiscount(30, 30), false);
   assert.equal(isSyncableOneCDiscount(20, 30), false);
   assert.equal(isSyncableOneCDiscount("not-a-number", 30), false);
+});
+
+test("1C stock helper treats only amounts above 0.1 as active", () => {
+  assert.equal(isActiveOneCStockAmount(0.11), true);
+  assert.equal(isActiveOneCStockAmount("0.11"), true);
+  assert.equal(isActiveOneCStockAmount(0.1), false);
+  assert.equal(isActiveOneCStockAmount(0), false);
+  assert.equal(isActiveOneCStockAmount(-1), false);
+  assert.equal(isActiveOneCStockAmount("not-a-number"), false);
+  assert.equal(isActiveOneCStockAmount(null), false);
+  assert.equal(isActiveOneCStockAmount(undefined), false);
 });

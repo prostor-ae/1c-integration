@@ -15,6 +15,7 @@ import {
   parseShopifyWeightMetafieldKg,
 } from "../src/app/lib/product-weight";
 import {
+  isActiveOneCStockAmount,
   isSyncableOneCDiscount,
   isSyncableOneCPrice,
 } from "../src/app/lib/one-c-values";
@@ -1005,7 +1006,7 @@ function buildStockStatusDifferences(
     uniqueBarcodes.forEach((barcode) => {
       const stockBalance = stock[barcode];
       stockByBarcode[barcode] = stockBalance ?? null;
-      if (stockBalance !== undefined && stockBalance > 0) {
+      if (isActiveOneCStockAmount(stockBalance)) {
         productInStock = true;
       }
     });
