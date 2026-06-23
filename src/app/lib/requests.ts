@@ -18,7 +18,8 @@
 
 // crm.prostor.ae/tst/hs/Integration/ProstorDatabaseStockBalances
 // returns list of products 1c which has stock balance and its stock balance. can return negative stock balance for some products, need to filter them out.
-// if item not in the list or stock balance lower then 0, item must be treated like out of stock
+// item is treated as in stock only when its stock balance is greater than 0.1.
+// if item is not in the list, invalid, or stock balance is less than or equal to 0.1, item must be treated like out of stock
 // response structure is:
 // {
 //   "Items": {
