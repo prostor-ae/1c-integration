@@ -224,6 +224,11 @@ function countShopifyVariants(
   return count;
 }
 
+async function sendManualSyncSuccessAlert(run: SyncRun): Promise<void> {
+  if (run.source !== "manual") return;
+  await sendSyncSuccessAlert({ run });
+}
+
 export async function acceptSyncRun({
   modes,
   source,
@@ -414,7 +419,7 @@ export async function continueSyncRun(
             durationMs: Date.now() - startedAt,
             ...summarizeSyncRun(run),
           });
-          await sendSyncSuccessAlert({ run });
+          await sendManualSyncSuccessAlert(run);
           return run;
         }
       } catch (error: any) {
@@ -450,7 +455,7 @@ export async function continueSyncRun(
       durationMs: Date.now() - startedAt,
       ...summarizeSyncRun(run),
     });
-    await sendSyncSuccessAlert({ run });
+    await sendManualSyncSuccessAlert(run);
     return run;
   }, initialRun.storeId);
 }
@@ -1051,7 +1056,7 @@ export async function handleBulkOperationFinished({
           completionSource: source,
           ...summarizeSyncRun(run),
         });
-        await sendSyncSuccessAlert({ run });
+        await sendManualSyncSuccessAlert(run);
       }
       return noBulkFinishContinuation(run);
     }
