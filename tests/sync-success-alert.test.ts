@@ -306,3 +306,44 @@ test("waiting bulk continuation noop does not send success notification", async 
     false,
   );
 });
+
+test("prices continuation marks 1C network failures with a clear 1C reason", async () => {
+  process.env.SHOPIFY_STORE_DOMAIN_TEST = "test-shop.myshopify.com";
+  process.env.SHOPIFY_ADMIN_TOKEN_TEST = "test-token";
+
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = requestUrl(input);
+    const body = requestBody(init);
+
+    if (url.includes("test-shop.myshopify.com/admin/api/")) {
+      const parsed = JSON.parse(body);
+      const query = String(parsed.query ?? "");
+      if (query.includes("currentBulkOperation")) {
+        return jsonResponse({ data: { currentBulkOperation: null } });
+      }
+    }
+
+    if (url.includes("ProstorDatabasePrices")) {
+      throw new TypeError("fetch failed");
+    }
+
+    throw new Error(`Unexpected fetch in test: ${url}`);
+  }) as typeof fetch;
+
+  const accepted = await createSyncRun({ modes: ["prices"], source: "cron" });
+
+  const capture = captureAlertSubjects();
+  try {
+    await continueSyncRun(accepted.runId, "cron");
+  } finally {
+    capture.restore();
+  }
+
+  const saved = await getSyncRun(accepted.runId);
+  assert.equal(saved?.status, "failed");
+  assert.equal(saved?.failureReason, "1C Prices fetch failed: fetch failed");
+  assert.equal(
+    capture.subjects.some((subject) => subject.includes("Sync failure (prices)")),
+    true,
+  );
+});
