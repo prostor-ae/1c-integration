@@ -101,7 +101,7 @@ export async function sendMissingBarcodeAlert({
     .filter((line): line is string => line !== null)
     .join("\n");
 
-  await sendAlert({ subject, body });
+  // await sendAlert({ subject, body });
 }
 
 export async function sendSafetyFloorAlert({
@@ -243,7 +243,11 @@ function formatSkippedRecord(
   return keys.map((mode) => `  - ${mode}: ${record[mode]}`).join("\n");
 }
 
-export function buildSyncSuccessAlert({ run }: { run: SyncRun }): SendAlertArgs {
+export function buildSyncSuccessAlert({
+  run,
+}: {
+  run: SyncRun;
+}): SendAlertArgs {
   const modes = run.requestedModes;
   const modeLabel = modes.join(", ") || "none";
   const hasWarnings = Object.keys(run.skippedByMode).length > 0;
