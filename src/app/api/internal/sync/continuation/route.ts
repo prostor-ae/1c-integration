@@ -7,7 +7,9 @@ import {
 } from "@/app/lib/qstash-sync";
 import {
   continueSyncRun,
+  createSyncInvocationBudget,
   enqueueBulkFinishNextContinuation,
+  FutureCheckpointSequenceError,
   handleBulkOperationFinished,
 } from "@/app/lib/sync";
 import {
@@ -46,6 +48,7 @@ function isSafeContinueNoop(
 
 async function handleContinueRun(
   payload: Extract<SyncContinuationPayload, { kind: "continue-run" }>,
+  invocationStartedAt: number,
 ) {
   const run = await getSyncRun(payload.runId);
   if (!run) {
@@ -79,7 +82,12 @@ async function handleContinueRun(
     return { ok: true, noop: true, reason: "cursor_mismatch" };
   }
 
-  const continued = await continueSyncRun(payload.runId, payload.source);
+  const continued = await continueSyncRun(
+    payload.runId,
+    payload.source,
+    payload.checkpointSequence ?? 0,
+    createSyncInvocationBudget({ startedAt: invocationStartedAt }),
+  );
   if (!continued) {
     throw new Error(
       `sync continuation was not processed for run ${payload.runId}; sync lock may be busy`,
@@ -177,7 +185,7 @@ export async function POST(request: Request) {
   try {
     const result =
       payload.kind === "continue-run"
-        ? await handleContinueRun(payload)
+        ? await handleContinueRun(payload, startedAt)
         : await handleBulkFinish(payload);
     logSyncEvent("qstash_continuation_handled", {
       kind: payload.kind,
@@ -187,6 +195,18 @@ export async function POST(request: Request) {
     return NextResponse.json(result);
   } catch (error: any) {
     const message = error?.message ?? String(error);
+    if (error instanceof FutureCheckpointSequenceError) {
+      logSyncEvent(
+        "qstash_continuation_rejected",
+        {
+          kind: payload.kind,
+          reason: error.code,
+          durationMs: Date.now() - startedAt,
+        },
+        "warn",
+      );
+      return nonRetryableJson({ ok: false, error: error.code });
+    }
     logSyncEvent(
       "qstash_continuation_failed",
       {

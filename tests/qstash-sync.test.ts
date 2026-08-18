@@ -4,6 +4,7 @@ import { POST as continuationPost } from "../src/app/api/internal/sync/continuat
 import { POST as continuationFailurePost } from "../src/app/api/internal/sync/continuation/failure/route";
 import {
   __setBulkOperationByIdForTests,
+  __setBulkFinishFailureBeforeLockedReadForTests,
   reconcileSyncRuns,
 } from "../src/app/lib/sync";
 import {
@@ -14,6 +15,7 @@ import {
   enqueueSyncContinuation,
   getContinuationRecordForFailureCallback,
   getSyncContinuationConfig,
+  isSyncContinuationPayload,
   type SyncContinuationPublishRequest,
 } from "../src/app/lib/qstash-sync";
 import {
@@ -52,6 +54,7 @@ beforeEach(() => {
   __resetMemorySyncStateForTests();
   __resetQstashSyncForTests();
   __setBulkOperationByIdForTests(null);
+  __setBulkFinishFailureBeforeLockedReadForTests(null);
   publishedContinuations = [];
   __setSyncContinuationPublisherForTests(async (request) => {
     assertSafeDeduplicationId(
@@ -97,12 +100,58 @@ test("continue-run dedupe is step-aware", () => {
     currentIndex: 0,
     currentMode: "prices",
   });
+  const nextCheckpoint = buildSyncContinuationDeduplicationId({
+    kind: "continue-run",
+    runId: "run-1",
+    source: "manual",
+    currentIndex: 0,
+    currentMode: "prices",
+    checkpointSequence: 1,
+  });
 
   assert.equal(first, firstAgain);
   assert.notEqual(first, second);
-  assert.notEqual(first, differentSource);
+  assert.equal(first, differentSource);
+  assert.notEqual(first, nextCheckpoint);
   assertSafeDeduplicationId(first, SAFE_CONTINUE_DEDUPLICATION_ID);
   assertSafeDeduplicationId(second, SAFE_CONTINUE_DEDUPLICATION_ID);
+});
+
+test("continue-run validation accepts legacy zero and rejects invalid sequences", () => {
+  const base = {
+    kind: "continue-run" as const,
+    runId: "run-1",
+    source: "manual" as const,
+    currentIndex: 0,
+    currentMode: "prices" as const,
+  };
+  assert.equal(isSyncContinuationPayload(base), true);
+  assert.equal(isSyncContinuationPayload({ ...base, checkpointSequence: 0 }), true);
+  assert.equal(isSyncContinuationPayload({ ...base, checkpointSequence: -1 }), false);
+  assert.equal(isSyncContinuationPayload({ ...base, checkpointSequence: 1.5 }), false);
+  assert.equal(isSyncContinuationPayload({ ...base, checkpointSequence: "1" }), false);
+});
+
+test("future checkpoint delivery is non-retryable and performs no run write", async () => {
+  const accepted = await createSyncRun({ modes: ["prices"], source: "manual" });
+  const before = await getSyncRun(accepted.runId);
+  const response = await continuationPost(
+    new Request("https://sync.example.test/api/internal/sync/continuation", {
+      method: "POST",
+      body: JSON.stringify({
+        kind: "continue-run",
+        runId: accepted.runId,
+        source: "manual",
+        currentIndex: 0,
+        currentMode: "prices",
+        checkpointSequence: 1,
+      }),
+    }),
+  );
+  const after = await getSyncRun(accepted.runId);
+  assert.equal(response.status, 489);
+  assert.equal(after?.version, before?.version);
+  assert.equal(after?.status, before?.status);
 });
 
 test("bulk-finish dedupe is status-canonical and QStash-safe", () => {
@@ -287,6 +336,7 @@ test("bulk-finish delivery advances to next mode and enqueues pending continuati
     currentIndex: 1,
     currentMode: "stock",
     runVersion: saved?.version,
+    checkpointSequence: 0,
   });
 });
 
@@ -329,6 +379,7 @@ test("reconciler enqueues next mode continuation after missed bulk-finish webhoo
     currentIndex: 1,
     currentMode: "stock",
     runVersion: saved?.version,
+    checkpointSequence: 0,
   });
 });
 
@@ -568,6 +619,50 @@ test("failure callback does not fail an already recovered bulk-finish", async ()
   assert.equal(response.status, 200);
   assert.equal(body.outcome, "noop_stale_or_recovered");
   assert.equal(saved?.status, "completed");
+});
+
+test("bulk-finish failure callback re-reads terminal recovery under the lock", async () => {
+  const accepted = await createSyncRun({ modes: ["stock"], source: "manual" });
+  const run = (await getSyncRun(accepted.runId)) as SyncRun;
+  run.status = "waiting_bulk";
+  run.activeBulkOperationId = "gid://shopify/BulkOperation/race";
+  run.activeBulkOperationType = "MUTATION";
+  await saveSyncRun(run);
+  const enqueueResult = await enqueueSyncContinuation({
+    kind: "bulk-finish",
+    opId: "gid://shopify/BulkOperation/race",
+    status: "COMPLETED",
+    errorCode: null,
+    source: "shopify-webhook",
+  });
+  __setBulkFinishFailureBeforeLockedReadForTests(async (runId, fencingToken) => {
+    const recovered = (await getSyncRun(runId)) as SyncRun;
+    recovered.status = "completed";
+    recovered.currentIndex = 1;
+    recovered.currentMode = null;
+    recovered.activeBulkOperationId = null;
+    recovered.activeBulkOperationType = null;
+    recovered.completedAt = new Date().toISOString();
+    await saveSyncRun(recovered, fencingToken);
+  });
+  const response = await continuationFailurePost(
+    new Request(
+      `https://sync.example.test/api/internal/sync/continuation/failure?cid=${enqueueResult.correlationId}`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          status: 500,
+          retried: 5,
+          maxRetries: 5,
+          sourceMessageId: enqueueResult.messageId,
+        }),
+      },
+    ),
+  );
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(body.outcome, "noop_stale_or_recovered");
+  assert.equal((await getSyncRun(accepted.runId))?.status, "completed");
 });
 
 test("failure callback does not acknowledge missing correlation", async () => {

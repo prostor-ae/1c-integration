@@ -3,11 +3,13 @@ import { sendBulkOpTimeoutAlert } from "./alerts";
 import { SHOPIFY_API_VERSION } from "./config";
 import {
   getShopifyCredentials,
+  getShopifyCredentialsForStoreId,
   getShopifyLogContext,
   normalizeShopifyDomain,
 } from "./shopify-env";
 import { parseShopifyWeightMetafieldKg } from "./product-weight";
 import { logSyncEvent } from "./sync-logging";
+import type { SyncMode } from "./sync-types";
 
 const API_VERSION = SHOPIFY_API_VERSION;
 
@@ -24,6 +26,12 @@ type ShopifyErrorDetails = {
   hostname?: string;
   address?: string;
   port?: string | number;
+};
+
+type ShopifyCallOptions = {
+  signal?: AbortSignal;
+  credentials?: { domain: string; token: string };
+  logContext?: Record<string, unknown>;
 };
 
 function getShopifyEnv(isTest: boolean): { domain: string; token: string } {
@@ -87,8 +95,10 @@ async function shopifyFetch(
   query: string,
   variables: any,
   isTest: boolean = false,
+  signal?: AbortSignal,
+  credentials?: { domain: string; token: string },
 ) {
-  const { domain, token } = getShopifyEnv(isTest);
+  const { domain, token } = credentials ?? getShopifyEnv(isTest);
   const SHOPIFY_GRAPHQL_URL = `https://${domain}/admin/api/${API_VERSION}/graphql.json`;
 
   const res = await fetch(SHOPIFY_GRAPHQL_URL, {
@@ -98,6 +108,7 @@ async function shopifyFetch(
       "X-Shopify-Access-Token": token,
     },
     body: JSON.stringify({ query, variables }),
+    signal,
   });
 
   if (!res.ok) {
@@ -131,6 +142,7 @@ function isThrottledGraphQLError(error: any): boolean {
 }
 
 function isRetryableError(error: any): boolean {
+  if (isAbortError(error)) return false;
   // Network error from fetch shows up as a TypeError (no statusCode).
   if (error instanceof TypeError) return true;
   if (error instanceof ApiError) {
@@ -144,16 +156,49 @@ function isRetryableError(error: any): boolean {
   return false;
 }
 
+export function isAbortError(error: unknown): boolean {
+  return Boolean(
+    error &&
+      typeof error === "object" &&
+      ((error as { name?: string }).name === "AbortError" ||
+        (error as { name?: string }).name === "TimeoutError" ||
+        (error as { code?: string }).code === "ABORT_ERR"),
+  );
+}
+
+function sleepWithSignal(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  if (signal.aborted) return Promise.reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timeout);
+      reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export async function callShopify(
   query: string,
   variables = {},
   isTest: boolean = false,
+  options: ShopifyCallOptions = {},
 ) {
   let lastError: any = null;
   const operationName = getGraphQLOperationName(query);
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      const data = await shopifyFetch(query, variables, isTest);
+      const data = await shopifyFetch(
+        query,
+        variables,
+        isTest,
+        options.signal,
+        options.credentials,
+      );
 
       if (!data.extensions || !data.extensions.cost) {
         return data;
@@ -171,7 +216,7 @@ export async function callShopify(
       ) {
         logSyncEvent("shopify_call_low_throttle_budget_after_success", {
           operationName,
-          ...getShopifyLogContext(isTest),
+          ...(options.logContext ?? getShopifyLogContext(isTest)),
           requestedQueryCost,
           actualQueryCost: cost.actualQueryCost ?? null,
           currentlyAvailable: currentAvailable,
@@ -193,13 +238,13 @@ export async function callShopify(
           maxAttempts: MAX_ATTEMPTS,
           retryable: true,
           operationName,
-          ...getShopifyLogContext(isTest),
+          ...(options.logContext ?? getShopifyLogContext(isTest)),
           error: describeShopifyError(error),
         }),
       );
       if (attempt < MAX_ATTEMPTS) {
         const backoffMs = 1000 * attempt;
-        await new Promise((r) => setTimeout(r, backoffMs));
+        await sleepWithSignal(backoffMs, options.signal);
       }
     }
   }
@@ -208,18 +253,40 @@ export async function callShopify(
   );
 }
 
+async function callShopifyForStoreId(
+  storeId: string,
+  query: string,
+  variables = {},
+  signal?: AbortSignal,
+) {
+  const { domain, token, isTest } = getShopifyCredentialsForStoreId(storeId);
+  return await callShopify(query, variables, isTest, {
+    signal,
+    credentials: { domain, token },
+    logContext: {
+      shopifyApiVersion: API_VERSION,
+      shopifyTarget: isTest ? "test" : "production",
+      shopifyDomain: domain,
+      shopifyDomainValid: true,
+      shopifyCredentialsConfigured: true,
+      shopifyTargetSource: "sync_store_alias",
+    },
+  });
+}
+
 export async function assertNoActiveBulkOperation(
   mode: "stock" | "prices" | "costs",
+  signal?: AbortSignal,
 ): Promise<void> {
   const query = `
     query {
-      currentBulkOperation {
+      currentBulkOperation(type: MUTATION) {
         id
         status
       }
     }
   `;
-  const data = await callShopify(query, {});
+  const data = await callShopify(query, {}, false, { signal });
   const op = data?.data?.currentBulkOperation;
   if (!op) return;
   const status = op.status;
@@ -233,6 +300,19 @@ export async function assertNoActiveBulkOperation(
       }),
     );
   }
+}
+
+export async function getCurrentBulkOperation(
+  signal?: AbortSignal,
+  storeId?: string,
+): Promise<{ id: string; status: string } | null> {
+  const query = `query currentBulkOperation { currentBulkOperation(type: MUTATION) { id status } }`;
+  const data = storeId
+    ? await callShopifyForStoreId(storeId, query, {}, signal)
+    : await callShopify(query, {}, false, { signal });
+  const operation = data?.data?.currentBulkOperation;
+  if (!operation?.id || !operation?.status) return null;
+  return { id: operation.id, status: operation.status };
 }
 
 export async function pollBulkOperation(
@@ -339,6 +419,8 @@ export type ShopifyBulkOperationStatus = {
 
 export async function getBulkOperationById(
   id: string,
+  signal?: AbortSignal,
+  storeId?: string,
 ): Promise<ShopifyBulkOperationStatus | null> {
   const query = `
     query bulkOperationStatus($id: ID!) {
@@ -354,7 +436,9 @@ export async function getBulkOperationById(
       }
     }
   `;
-  const data = await callShopify(query, { id });
+  const data = storeId
+    ? await callShopifyForStoreId(storeId, query, { id }, signal)
+    : await callShopify(query, { id }, false, { signal });
   const op = data?.data?.node;
   if (!op) return null;
   return {
@@ -452,17 +536,24 @@ export const COST_UPDATE_BULK_MUTATION = `
 
 export function buildCostUpdateBulkMutationJsonl(
   updates: CostUpdateBulkMutationInput[],
+  maxBytes = Number.POSITIVE_INFINITY,
 ): string {
-  return updates
-    .map((u) =>
-      JSON.stringify({
-        id: u.inventoryItemId,
-        input: {
-          cost: u.cost,
-        },
-      }),
-    )
-    .join("\n");
+  const lines: string[] = [];
+  let bytes = 0;
+  for (const update of updates) {
+    const line = JSON.stringify({
+      id: update.inventoryItemId,
+      input: {
+        cost: update.cost,
+      },
+    });
+    bytes += Buffer.byteLength(line) + (lines.length > 0 ? 1 : 0);
+    if (bytes > maxBytes) {
+      throw new Error(`sync bulk manifest exceeds ${maxBytes} byte limit`);
+    }
+    lines.push(line);
+  }
+  return lines.join("\n");
 }
 
 export async function runCostUpdateBulkMutation(
@@ -526,7 +617,6 @@ export async function runCostUpdateBulkMutation(
   });
 
   if (!uploadResponse.ok) {
-    const errorText = await uploadResponse.text();
     logSyncEvent(
       "shopify_bulk_mutation_jsonl_upload_failed",
       {
@@ -534,11 +624,12 @@ export async function runCostUpdateBulkMutation(
         updateCount: updates.length,
         uploadStatus: uploadResponse.status,
         uploadStatusText: uploadResponse.statusText,
-        error: errorText.slice(0, 1000),
       },
       "error",
     );
-    throw new Error(`Failed to upload to staged target: ${errorText}`);
+    throw new Error(
+      `Failed to upload cost mutation manifest (HTTP ${uploadResponse.status})`,
+    );
   }
   console.log("Successfully uploaded JSONL file for bulk mutation.");
   logSyncEvent("shopify_bulk_mutation_jsonl_uploaded", {
@@ -606,6 +697,7 @@ export type ShopifyProductInfo = {
   handle: string;
   status: "ACTIVE" | "DRAFT" | "ARCHIVED";
   weightKg: number | null;
+  excludeFrom1cStatusSync: boolean;
   variants: {
     id: string;
     barcode: string;
@@ -614,6 +706,117 @@ export type ShopifyProductInfo = {
     compareAtPrice: string | null;
   }[];
 };
+
+type ShopifyMetafieldValue = {
+  type?: unknown;
+  value?: unknown;
+} | null | undefined;
+
+export function parseExcludeFrom1cStatusSyncMetafield(
+  metafield: ShopifyMetafieldValue,
+): boolean {
+  return metafield?.type === "boolean" && metafield.value === "true";
+}
+
+export type ShopifyProductPage = {
+  products: ShopifyProductInfo[];
+  endCursor: string | null;
+  hasNextPage: boolean;
+  truncatedProductIds: string[];
+};
+
+export class ShopifyProductVariantsTruncatedError extends Error {
+  readonly code = "shopify_product_variants_truncated";
+  readonly productIds: string[];
+
+  constructor(
+    productIds: string[],
+    samples: Array<{ id: string; handle: string }> = [],
+  ) {
+    const bounded = productIds.slice(0, 25);
+    const detail = samples.length > 0
+      ? samples
+          .slice(0, 25)
+          .map(({ id, handle }) => `${handle} (${id})`)
+          .join(", ")
+      : bounded.join(", ");
+    super(`${"shopify_product_variants_truncated"}: ${detail}`);
+    this.name = "ShopifyProductVariantsTruncatedError";
+    this.productIds = bounded;
+  }
+}
+
+function mapShopifyProductNode(node: any): ShopifyProductInfo {
+  return {
+    id: node.id,
+    handle: node.handle,
+    status: node.status,
+    weightKg: parseShopifyWeightMetafieldKg(node.weightMetafield),
+    excludeFrom1cStatusSync: parseExcludeFrom1cStatusSyncMetafield(
+      node.excludeFrom1cStatusSyncMetafield,
+    ),
+    variants: node.variants.edges.map((vEdge: any) => ({
+      ...vEdge.node,
+      barcode: vEdge.node.barcode ?? "",
+      sku: vEdge.node.sku ?? null,
+    })),
+  };
+}
+
+export async function fetchShopifyProductPage(
+  after: string | null,
+  options: { signal?: AbortSignal } = {},
+): Promise<ShopifyProductPage> {
+  const query = `
+    query products($cursor: String) {
+      products(first: 50, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        edges {
+          node {
+            id
+            handle
+            status
+            weightMetafield: metafield(namespace: "custom", key: "weight") {
+              value
+            }
+            excludeFrom1cStatusSyncMetafield: metafield(
+              namespace: "custom"
+              key: "exclude_from_1c_status_sync"
+            ) {
+              type
+              value
+            }
+            variants(first: 100) {
+              pageInfo { hasNextPage }
+              edges {
+                node { id barcode sku price compareAtPrice }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+  const data = await callShopify(
+    query,
+    { cursor: after },
+    false,
+    { signal: options.signal },
+  );
+  const connection = data.data.products;
+  const truncatedProductIds = connection.edges
+    .filter((edge: any) => edge.node.variants?.pageInfo?.hasNextPage === true)
+    .map((edge: any) => String(edge.node.id))
+    .slice(0, 25);
+  return {
+    products: connection.edges.map((edge: any) =>
+      mapShopifyProductNode(edge.node),
+    ),
+    endCursor: connection.pageInfo.endCursor ?? null,
+    hasNextPage: connection.pageInfo.hasNextPage === true,
+    truncatedProductIds,
+  };
+}
 
 function uniqueNonEmptyValues(values: string[]): string[] {
   return Array.from(
@@ -643,57 +846,20 @@ export async function fetchAllShopifyProductsAndVariants(): Promise<
   Map<string, ShopifyProductInfo>
 > {
   const products = new Map<string, ShopifyProductInfo>();
-  let cursor = null;
+  let cursor: string | null = null;
   let hasNextPage = true;
 
   console.log("Fetching all Shopify products and variants...");
 
   while (hasNextPage) {
-    const query = `
-      query products($cursor: String) {
-        products(first: 50, after: $cursor) {
-          pageInfo {
-            hasNextPage
-            endCursor
-          }
-          edges {
-            node {
-              id
-              handle
-              status
-              weightMetafield: metafield(namespace: "custom", key: "weight") {
-                value
-              }
-              variants(first: 100) {
-                edges {
-                  node {
-                    id
-                    barcode
-                    price
-                    compareAtPrice
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    `;
-    const variables = { cursor };
-    const data = await callShopify(query, variables);
+    const page = await fetchShopifyProductPage(cursor);
+    if (page.truncatedProductIds.length > 0) {
+      throw new ShopifyProductVariantsTruncatedError(page.truncatedProductIds);
+    }
+    page.products.forEach((product) => products.set(product.id, product));
 
-    data.data.products.edges.forEach((edge: any) => {
-      products.set(edge.node.id, {
-        id: edge.node.id,
-        handle: edge.node.handle,
-        status: edge.node.status,
-        weightKg: parseShopifyWeightMetafieldKg(edge.node.weightMetafield),
-        variants: edge.node.variants.edges.map((vEdge: any) => vEdge.node),
-      });
-    });
-
-    hasNextPage = data.data.products.pageInfo.hasNextPage;
-    cursor = data.data.products.pageInfo.endCursor;
+    hasNextPage = page.hasNextPage;
+    cursor = page.endCursor;
     console.log(`Fetched page of products, total fetched: ${products.size}`);
   }
 
@@ -703,6 +869,7 @@ export async function fetchAllShopifyProductsAndVariants(): Promise<
 
 export async function fetchShopifyProductsAndVariantsByIdentifiers(
   identifiers: string[],
+  signal?: AbortSignal,
 ): Promise<Map<string, ShopifyProductInfo>> {
   const uniqueIdentifiers = uniqueNonEmptyValues(identifiers);
   const products = new Map<string, ShopifyProductInfo>();
@@ -733,6 +900,13 @@ export async function fetchShopifyProductsAndVariantsByIdentifiers(
               weightMetafield: metafield(namespace: "custom", key: "weight") {
                 value
               }
+              excludeFrom1cStatusSyncMetafield: metafield(
+                namespace: "custom"
+                key: "exclude_from_1c_status_sync"
+              ) {
+                type
+                value
+              }
             }
           }
         }
@@ -749,7 +923,12 @@ export async function fetchShopifyProductsAndVariantsByIdentifiers(
     let hasNextPage = true;
 
     while (hasNextPage) {
-      const data = await callShopify(query, { query: searchQuery, cursor });
+      const data = await callShopify(
+        query,
+        { query: searchQuery, cursor },
+        false,
+        { signal },
+      );
       const connection = data.data.productVariants;
 
       connection.edges.forEach((edge: any) => {
@@ -763,6 +942,9 @@ export async function fetchShopifyProductsAndVariantsByIdentifiers(
           status: productNode.status,
           weightKg: parseShopifyWeightMetafieldKg(
             productNode.weightMetafield,
+          ),
+          excludeFrom1cStatusSync: parseExcludeFrom1cStatusSyncMetafield(
+            productNode.excludeFrom1cStatusSyncMetafield,
           ),
           variants: [],
         };
@@ -836,7 +1018,6 @@ export async function runPriceUpdateBulkMutation(
   formData.append("file", new Blob([jsonl], { type: "application/jsonl" }));
   const uploadResponse = await fetch(url, { method: "POST", body: formData });
   if (!uploadResponse.ok) {
-    const errorText = await uploadResponse.text();
     logSyncEvent(
       "shopify_bulk_mutation_jsonl_upload_failed",
       {
@@ -844,11 +1025,12 @@ export async function runPriceUpdateBulkMutation(
         updateCount: updates.length,
         uploadStatus: uploadResponse.status,
         uploadStatusText: uploadResponse.statusText,
-        error: errorText.slice(0, 1000),
       },
       "error",
     );
-    throw new Error(`Failed to upload to staged target: ${errorText}`);
+    throw new Error(
+      `Failed to upload price mutation manifest (HTTP ${uploadResponse.status})`,
+    );
   }
   console.log("Successfully uploaded JSONL for price update bulk mutation.");
   logSyncEvent("shopify_bulk_mutation_jsonl_uploaded", {
@@ -921,10 +1103,12 @@ export const PRICE_UPDATE_BULK_MUTATION = `
 
 export function buildPriceUpdateBulkMutationJsonl(
   updates: PriceUpdateBulkMutationInput[],
+  maxBytes = Number.POSITIVE_INFINITY,
 ): string {
-  return updates
-    .map((u) =>
-      JSON.stringify({
+  const lines: string[] = [];
+  let bytes = 0;
+  for (const u of updates) {
+    const line = JSON.stringify({
         productId: u.productId,
         variants: [
           {
@@ -933,14 +1117,172 @@ export function buildPriceUpdateBulkMutationJsonl(
             compareAtPrice: u.compareAtPrice,
           },
         ],
-      }),
-    )
-    .join("\n");
+      });
+    bytes += Buffer.byteLength(line) + (lines.length > 0 ? 1 : 0);
+    if (bytes > maxBytes) throw new Error(`sync bulk manifest exceeds ${maxBytes} byte limit`);
+    lines.push(line);
+  }
+  return lines.join("\n");
+}
+
+export type StatusUpdateBulkMutationInput = {
+  productId: string;
+  status: "ACTIVE" | "DRAFT";
+};
+
+export const STATUS_UPDATE_BULK_MUTATION = `
+  mutation productUpdate($input: ProductInput!) {
+    productUpdate(input: $input) {
+      product { id status }
+      userErrors { field message }
+    }
+  }
+`;
+
+export function buildStatusUpdateBulkMutationJsonl(
+  updates: StatusUpdateBulkMutationInput[],
+  maxBytes = Number.POSITIVE_INFINITY,
+): string {
+  const lines: string[] = [];
+  let bytes = 0;
+  for (const update of updates) {
+    const line = JSON.stringify({
+        input: { id: update.productId, status: update.status },
+      });
+    bytes += Buffer.byteLength(line) + (lines.length > 0 ? 1 : 0);
+    if (bytes > maxBytes) throw new Error(`sync bulk manifest exceeds ${maxBytes} byte limit`);
+    lines.push(line);
+  }
+  return lines.join("\n");
+}
+
+export async function createAndUploadBulkMutationManifest({
+  mode,
+  jsonl,
+  stagedUploadAttempt,
+  signal,
+}: {
+  mode: SyncMode;
+  jsonl: string;
+  stagedUploadAttempt: number;
+  signal?: AbortSignal;
+}): Promise<{ stagedUploadPath: string }> {
+  const filename = `${mode}-updates-${stagedUploadAttempt}.jsonl`;
+  const stagedUploadsQuery = `
+    mutation stagedUploadsCreate($input: [StagedUploadInput!]!) {
+      stagedUploadsCreate(input: $input) {
+        stagedTargets { url parameters { name value } }
+        userErrors { field message }
+      }
+    }
+  `;
+  const result = await callShopify(
+    stagedUploadsQuery,
+    {
+      input: [{
+        resource: "BULK_MUTATION_VARIABLES",
+        filename,
+        mimeType: "application/jsonl",
+        httpMethod: "POST",
+      }],
+    },
+    false,
+    { signal },
+  );
+  const payload = result.data.stagedUploadsCreate;
+  if (payload.userErrors?.length) {
+    throw new Error(`Failed to create staged upload: ${JSON.stringify(payload.userErrors)}`);
+  }
+  const target = payload.stagedTargets?.[0];
+  if (!target?.url || !Array.isArray(target.parameters)) {
+    throw new Error("Shopify staged upload target was missing required fields");
+  }
+  const key = target.parameters.find(
+    (parameter: { name: string; value: string }) => parameter.name === "key",
+  )?.value;
+  if (!key) throw new Error("Shopify staged upload target was missing key");
+
+  const formData = new FormData();
+  target.parameters.forEach(
+    (parameter: { name: string; value: string }) =>
+      formData.append(parameter.name, parameter.value),
+  );
+  formData.append("file", new Blob([jsonl], { type: "application/jsonl" }));
+  const uploadResponse = await fetch(target.url, {
+    method: "POST",
+    body: formData,
+    signal,
+  });
+  if (!uploadResponse.ok) {
+    throw new Error(
+      `Failed to upload ${mode} manifest: HTTP ${uploadResponse.status}`,
+    );
+  }
+  logSyncEvent("shopify_bulk_manifest_uploaded", {
+    mode,
+    stagedUploadAttempt,
+    byteLength: Buffer.byteLength(jsonl),
+  });
+  return { stagedUploadPath: key };
+}
+
+export async function launchPreparedBulkMutation({
+  mode,
+  stagedUploadPath,
+  clientIdentifier,
+  signal,
+}: {
+  mode: SyncMode;
+  stagedUploadPath: string;
+  clientIdentifier: string;
+  signal?: AbortSignal;
+}): Promise<{ id: string; status: string }> {
+  const mutation = `
+    mutation bulkOperationRunMutation(
+      $mutation: String!
+      $stagedUploadPath: String!
+      $clientIdentifier: String!
+    ) {
+      bulkOperationRunMutation(
+        mutation: $mutation
+        stagedUploadPath: $stagedUploadPath
+        clientIdentifier: $clientIdentifier
+      ) {
+        bulkOperation { id status }
+        userErrors { field message }
+      }
+    }
+  `;
+  const result = await callShopify(
+    mutation,
+    {
+      mutation:
+        mode === "costs"
+          ? COST_UPDATE_BULK_MUTATION
+          : mode === "prices"
+            ? PRICE_UPDATE_BULK_MUTATION
+            : STATUS_UPDATE_BULK_MUTATION,
+      stagedUploadPath,
+      clientIdentifier,
+    },
+    false,
+    { signal },
+  );
+  const payload = result.data.bulkOperationRunMutation;
+  if (payload.userErrors?.length) {
+    throw new Error(`Failed to start ${mode} bulk operation: ${JSON.stringify(payload.userErrors)}`);
+  }
+  const operation = payload.bulkOperation;
+  if (!operation?.id || !operation?.status) {
+    throw new Error(`Shopify returned malformed ${mode} bulk operation response`);
+  }
+  return operation;
 }
 
 export async function updateProductStatus(
   productId: string,
   status: "ACTIVE" | "DRAFT",
+  signal?: AbortSignal,
 ) {
   const mutation = `
     mutation productUpdate($input: ProductInput!) {
@@ -950,12 +1292,17 @@ export async function updateProductStatus(
       }
     }
   `;
-  const result = await callShopify(mutation, {
-    input: {
-      id: productId,
-      status,
+  const result = await callShopify(
+    mutation,
+    {
+      input: {
+        id: productId,
+        status,
+      },
     },
-  });
+    false,
+    { signal },
+  );
   const userErrors = result.data.productUpdate.userErrors;
   if (userErrors.length > 0) {
     throw new Error(
@@ -1018,7 +1365,6 @@ export async function runStatusUpdateBulkMutation(
   formData.append("file", new Blob([jsonl], { type: "application/jsonl" }));
   const uploadResponse = await fetch(url, { method: "POST", body: formData });
   if (!uploadResponse.ok) {
-    const errorText = await uploadResponse.text();
     logSyncEvent(
       "shopify_bulk_mutation_jsonl_upload_failed",
       {
@@ -1026,11 +1372,12 @@ export async function runStatusUpdateBulkMutation(
         updateCount: updates.length,
         uploadStatus: uploadResponse.status,
         uploadStatusText: uploadResponse.statusText,
-        error: errorText.slice(0, 1000),
       },
       "error",
     );
-    throw new Error(`Failed to upload to staged target: ${errorText}`);
+    throw new Error(
+      `Failed to upload status mutation manifest (HTTP ${uploadResponse.status})`,
+    );
   }
   console.log("Successfully uploaded JSONL for status update bulk mutation.");
   logSyncEvent("shopify_bulk_mutation_jsonl_uploaded", {

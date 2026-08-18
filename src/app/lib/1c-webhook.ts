@@ -12,17 +12,28 @@ type OneCAvailability = "Yes" | "No";
 type ShopifyStatus = "ACTIVE" | "DRAFT";
 type ShopifyStatusUpdate = { productId: string; status: ShopifyStatus };
 
-type ProcessDeps = {
+export class OneCStatusSyncFencedError extends Error {
+  constructor() {
+    super("one_c_status_sync_fenced");
+    this.name = "OneCStatusSyncFencedError";
+  }
+}
+
+export type ProcessDeps = {
   fetchProductsByIdentifiers: (
     identifiers: string[],
+    signal?: AbortSignal,
   ) => Promise<Map<string, ShopifyProductInfo>>;
   updateProductStatus: (
     productId: string,
     status: ShopifyStatus,
+    signal?: AbortSignal,
   ) => Promise<{ id: string; status: ShopifyProductInfo["status"] }>;
   sendMissingBarcodeAlert?: (
     args: MissingBarcodeAlertArgs,
   ) => Promise<void>;
+  beforeMutations?: () => Promise<void>;
+  signal?: AbortSignal;
 };
 
 const DEFAULT_DEPS: ProcessDeps = {
@@ -68,6 +79,7 @@ export function buildStatusUpdatesFromWebhookItems(
   const desiredByProduct = new Map<string, ShopifyStatus>();
   const statusByProduct = new Map<string, ShopifyProductInfo["status"]>();
   const knownBarcodes = new Set<string>();
+  const protectedProductIds = new Set<string>();
 
   products.forEach((product) => {
     statusByProduct.set(product.id, product.status);
@@ -82,6 +94,10 @@ export function buildStatusUpdatesFromWebhookItems(
         if (!(identifier in items)) continue;
 
         knownBarcodes.add(identifier);
+        if (product.excludeFrom1cStatusSync) {
+          protectedProductIds.add(product.id);
+          continue;
+        }
         const desiredStatus = items[identifier] === "Yes" ? "ACTIVE" : "DRAFT";
         const previous = desiredByProduct.get(product.id);
 
@@ -115,6 +131,7 @@ export function buildStatusUpdatesFromWebhookItems(
       unknown: unknownBarcodes.length,
       unchanged,
       proposed: updates.length,
+      protectedProductsSkipped: protectedProductIds.size,
     },
     unknownBarcodes,
   };
@@ -122,16 +139,27 @@ export function buildStatusUpdatesFromWebhookItems(
 
 export async function processOneCWebhookItems(
   items: Record<string, OneCAvailability>,
-  deps: ProcessDeps = DEFAULT_DEPS,
+  overrides: Partial<ProcessDeps> = {},
 ) {
-  const products = await deps.fetchProductsByIdentifiers(Object.keys(items));
+  const deps: ProcessDeps = { ...DEFAULT_DEPS, ...overrides };
+  deps.signal?.throwIfAborted();
+  const products = await deps.fetchProductsByIdentifiers(
+    Object.keys(items),
+    deps.signal,
+  );
   const result = buildStatusUpdatesFromWebhookItems(products, items);
   const updatedProducts = [];
 
+  // The route uses this boundary to re-read durable launch fencing after all
+  // Shopify reads and immediately before the first status mutation.
+  await deps.beforeMutations?.();
+
   for (const update of result.updates) {
+    deps.signal?.throwIfAborted();
     const updatedProduct = await deps.updateProductStatus(
       update.productId,
       update.status,
+      deps.signal,
     );
     updatedProducts.push(updatedProduct);
   }

@@ -1,6 +1,6 @@
 # 1c-integration
 
-Next.js service that syncs the Prostor 1C catalog into Shopify. Two surfaces drive the same shared `runSync({ modes })` core:
+Next.js service that syncs the Prostor 1C catalog into Shopify. Cron and manual routes use the same durable asynchronous orchestrator:
 
 - **Daily cron** at `/api/cron/daily-sync` — runs `stock + prices` only.
 - **Manual trigger** at `/api/sync/trigger` — accepts any combination of `stock`, `prices`, `costs`.
@@ -70,6 +70,21 @@ Duplicate barcodes: <count>
 
 It always exits 0 and never mutates anything. Resolve all duplicates and blanks **before** triggering any sync.
 
+Also run the read-only nested-variant preflight:
+
+```bash
+npm run audit:variant-pagination -- --target=test
+```
+
+Select `--target=production` only during an explicitly approved production
+preflight. The required target flag prevents silently auditing the wrong shop.
+It scans the same outer product connection used by price/stock sync, prints at
+most 25 product handles/IDs whose `variants(first: 100)` connection continues,
+and exits `2` when any are found. It never mutates Shopify. Resolve every result
+before enabling the adaptive sync. The runtime guard remains active because the
+catalog can change after a clean preflight; a truncated product fails the mode
+before any price or status mutation can start.
+
 `tsx` is bundled in `devDependencies`, so `npx tsx ...` resolves from the local lockfile after `npm install`.
 
 ## Local Shopify test-store ↔ 1C diff
@@ -115,6 +130,43 @@ npm run diff:shopify-1c -- --fail-on-diff
 npm run diff:shopify-1c -- --verbose
 ```
 
+## Export: products excluded from 1C status sync
+
+Products whose `custom.exclude_from_1c_status_sync` metafield is boolean `true`
+are skipped by the status sync (`src/app/lib/sync.ts`,
+`src/app/lib/1c-webhook.ts`), so 1C never activates or deactivates them. To list
+them:
+
+```bash
+npm run export:1c-status-sync-exclusions -- --target=test
+```
+
+The script is read-only, reads `.env.local` when present, pages the whole
+product catalog, and writes an Excel workbook to
+`reports/1c-status-sync-exclusions/` with two sheets:
+
+- **Summary** — total products, excluded vs not excluded, the excluded share of
+  the catalog, an ACTIVE/DRAFT/ARCHIVED breakdown for both groups, and the raw
+  metafield-state counts (`true` vs `absent`).
+- **Excluded products** — `productId`, `handle`, `title`, `status`,
+  `totalInventory`, `variantCount`, `skus`, `barcodes`.
+
+The same totals are printed to stdout, so the console output alone answers "how
+many products are excluded?" without opening the workbook.
+
+```bash
+# Read the production store (explicit opt-in, still read-only)
+npm run export:1c-status-sync-exclusions -- --target=production
+
+# Pick an exact destination and also emit a CSV of the excluded rows
+npm run export:1c-status-sync-exclusions -- --target=test \
+  --output=/tmp/exclusions.xlsx --csv
+```
+
+Like the pre-flight audit, `--target` is required so the wrong shop is never
+read by accident. Products with more than 100 variants are still listed; only
+their `skus`/`barcodes` columns truncate, and the script warns when that happens.
+
 ## Operations
 
 The manual trigger endpoint accepts any combination of modes:
@@ -153,6 +205,20 @@ can be fixed in 1C without being mixed into normal price-update differences.
 
 The 20% safety floor only applies to `stock` mode: if more than 20% of currently-ACTIVE products would flip to DRAFT, the bulk op is skipped, an alert email is sent from `notification@morlavi92.uk` to `chepiga.lev@gmail.com`, and the run returns `results.stock.skipped` with the percentage. Other modes have no percentage floor — only an empty-payload check per 1C endpoint.
 
+### Excluding a product from automated status changes
+
+Create a Shopify product metafield definition with namespace/key
+`custom.exclude_from_1c_status_sync` and type **Boolean**. Only the exact Admin
+API representation `{ type: "boolean", value: "true" }` protects a product;
+missing, false, malformed, or wrong-type values do not.
+
+Protection is status-only. Daily/manual stock sync and the real-time 1C webhook
+will not change the protected product between `ACTIVE` and `DRAFT`, while price,
+compare-at-price, and inventory cost synchronization remain unchanged. Protected
+products are excluded from both sides of the 20% stock safety ratio and are
+reported in `protectedSkippedByMode.stock` / `protectedProductsSkipped`. Their
+barcode/SKU is still a known webhook match, so it is not reported as missing.
+
 If a previous bulk op is still RUNNING/CREATED when a mode starts, that mode is skipped (Shopify allows only one bulk op per app at a time) and a conflict alert is emailed.
 
 ## Deprecation: `/api/update-costs`
@@ -187,6 +253,9 @@ The sync endpoints are quick-ack: they accept work, persist a short-lived run re
 Required production infrastructure:
 
 - **Upstash Redis via Vercel Marketplace**. This project expects `REDIS_URL` for durable orchestration state. If `REDIS_URL` is missing in production, sync acceptance fails closed with `503 { ok: false, error: "redis_required" }` and never falls back to long synchronous execution.
+- **Upstash QStash** using the existing `QSTASH_TOKEN`, signing keys, and app
+  base URL configuration. Adaptive continuation adds no provider, dependency,
+  or environment variable.
 - `SHOPIFY_API_VERSION=2026-04`.
 - `CRON_SECRET` for Vercel Cron authentication. Vercel sends it as
   `Authorization: Bearer <CRON_SECRET>` when invoking cron routes.
@@ -202,6 +271,67 @@ Operational model:
 - `/api/sync/trigger` schedules manual modes in canonical order `costs -> prices -> stock` and returns quickly.
 - `/api/webhooks/shopify/bulk-operations` accepts Shopify bulk completion webhooks from the effective Shopify shop and enqueues a QStash `bulk-finish` continuation; the continuation advances the next mode idempotently.
 - `/api/cron/reconcile-sync` repairs missed webhook transitions and alerts for stale operations.
+- Price/stock catalog pages run against a 50-second external-request deadline
+  inside the 60-second continuation route. The scanner checkpoints only when
+  the next measured page plus 8 seconds of headroom would cross that deadline.
+  A never-yielded scan can finalize inline with at least 15 seconds remaining;
+  resumed scans always finalize in a fresh invocation.
+- Redis stores immutable, versioned 1C mode inputs, deterministic diff chunks,
+  page counters, and sequence-fenced continuation identity for 14 days. Raw
+  inputs, diffs, and Shopify cursors are AES-GCM sealed before storage and are
+  never logged. QStash messages contain only run/mode/index/version/sequence.
+  Checkpoints also bind every diff chunk to its expected count and SHA-256;
+  missing or corrupt chunks fail before manifest creation. Finalization is
+  capped at 100,000 updates and a 15 MiB manifest.
+- Sealed artifacts use a versioned key identifier. `INTERNAL_API_KEY` is the
+  current encryption key; QStash and Redis credentials are never repurposed.
+  Rotation needs no new required setting: before changing `INTERNAL_API_KEY`,
+  set the optional rotation-only `SYNC_ARTIFACT_PREVIOUS_KEYS` to the old key
+  (comma-separated, newest first), deploy that overlap, then rotate
+  `INTERNAL_API_KEY`. Keep the old key ring for at least the 14-day artifact
+  TTL, then remove it. Removing a needed prior key makes only the affected
+  in-flight run unreadable, and that run fails closed.
+- A fast no-op `prices -> stock` invocation may reuse its complete request-local
+  product map when the measured remaining budget is sufficient. It is never a
+  module-global or persistent product cache; any yield, price mutation, or new
+  invocation forces a fresh stock scan.
+- Cost, price, and status manifests are canonically ordered and hashed before
+  upload.
+  Launch intent is durable before Shopify is called, operation association is
+  one fenced atomic state transition for every asynchronous sync mode, and a
+  post-`launch_requested` ambiguity is never retried or adopted by client
+  identifier. It fails the run and creates a 14-day store quarantine, causing
+  new sync acceptance to return `503 ambiguous_bulk_quarantine`.
+- Realtime 1C status webhooks take the same per-store sync lock as orchestration,
+  re-read quarantine and launch fencing immediately before their first Shopify
+  status mutation, and hold the lock through all status writes. Lock contention
+  or a fence returns retryable HTTP `503`; prices are not changed by this route.
+  Identifier reads, Shopify retry sleeps, and status writes share a 240-second
+  abort deadline, leaving a 60-second safety margin inside the 300-second lock
+  lease even though the route platform duration is also 300 seconds. Deadline
+  exhaustion returns retryable `503` and prevents later mutations.
+- Quarantine reconciliation is read-only and clears automatically only after
+  24 hours plus three no-active-mutation checks at least five minutes apart.
+  An operator may submit the matching quarantine token to
+  `POST /api/sync/quarantine/clear` (with the normal `x-api-key`; optionally a
+  known terminal `terminalOperationId`). Inconclusive diagnostics stay fenced.
+  When Shopify returned an operation ID, operator clear requires that exact ID
+  to be terminal and also requires no active mutation; an unrelated historical
+  terminal operation is never accepted as proof. A durable launch fence is
+  written before the request and remains even if quarantine persistence fails.
+- A launch fence blocks admission on its own, so it is never left without a way
+  out. A resumed run that finds a `launch_requested` intent quarantines it before
+  validating manifest identity, including when the recomputed diff no longer
+  matches. If a fence still ends up with no quarantine record — the invocation
+  died, or the run and intent aged out from under it — sync acceptance, the
+  reconcile cron, and operator clear each adopt it into a normal quarantine,
+  inheriting the fence's timestamp so the 24-hour minimum age is not restarted.
+  The fence itself expires after 30 days as a last-resort backstop. Quarantine
+  tokens are emitted in `sync_bulk_launch_ambiguous` and
+  `sync_bulk_launch_fence_adopted`, and `GET /api/sync/status` reports the
+  current blocker (`admissionBlocker`) with its owning `storeId` and the token
+  needed to clear it. Reconciliation and operator clear query that owning store
+  even when the deployment's effective Shopify target currently differs.
 - There is no dashboard/run history requirement. Success and failure emails/logs are the operator signals for completed sync runs.
 
 Useful Vercel log events:

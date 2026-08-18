@@ -24,6 +24,8 @@ export function summarizeSyncRun(run: SyncRun): LogFields {
     proposedByMode: run.proposedByMode,
     appliedByMode: run.appliedByMode,
     skippedByMode: run.skippedByMode,
+    checkpointSequenceByMode: run.checkpointSequenceByMode,
+    protectedSkippedByMode: run.protectedSkippedByMode,
     attempts: run.attempts,
     version: run.version,
     createdAt: run.createdAt,

@@ -3,15 +3,13 @@ import {
   getContinuationRecordForFailureCallback,
   isSyncContinuationConfigError,
   isSyncContinuationPayload,
-  type SyncContinuationPayload,
   verifyQstashRequest,
 } from "@/app/lib/qstash-sync";
-import { markSyncRunFailed } from "@/app/lib/sync";
 import {
-  getRunIdForOperation,
-  getSyncRun,
-  type SyncRun,
-} from "@/app/lib/sync-state";
+  failSyncContinuationIfCurrent,
+  failBulkFinishContinuationIfCurrent,
+} from "@/app/lib/sync";
+import { getSyncRun } from "@/app/lib/sync-state";
 import { logSyncEvent, summarizeSyncRun } from "@/app/lib/sync-logging";
 import { sanitizeOperationalTextExcerpt } from "@/app/lib/sensitive-text";
 
@@ -86,36 +84,6 @@ function summarizeCallback(body: QstashFailureCallbackBody): string {
     bodyExcerpt ? `responseBody=${bodyExcerpt}` : null,
   ].filter((part): part is string => Boolean(part));
   return parts.join(", ");
-}
-
-function isSameContinueRunCursor(
-  run: SyncRun,
-  payload: Extract<SyncContinuationPayload, { kind: "continue-run" }>,
-): boolean {
-  return (
-    run.currentIndex === payload.currentIndex &&
-    run.currentMode === payload.currentMode
-  );
-}
-
-function shouldFailContinueRunForExhaustedContinuation(
-  run: SyncRun | null,
-  payload: Extract<SyncContinuationPayload, { kind: "continue-run" }>,
-): boolean {
-  if (!run) return false;
-  if (!["queued", "running"].includes(run.status)) return false;
-  return isSameContinueRunCursor(run, payload);
-}
-
-function shouldFailBulkFinishForExhaustedContinuation(
-  run: SyncRun | null,
-  payload: Extract<SyncContinuationPayload, { kind: "bulk-finish" }>,
-): boolean {
-  return Boolean(
-    run &&
-    run.status === "waiting_bulk" &&
-    run.activeBulkOperationId === payload.opId,
-  );
 }
 
 export async function POST(request: Request) {
@@ -226,17 +194,11 @@ export async function POST(request: Request) {
   let outcome = "marked_failed";
 
   if (payload.kind === "continue-run") {
-    const run = await getSyncRun(payload.runId);
-    if (shouldFailContinueRunForExhaustedContinuation(run, payload)) {
-      await markSyncRunFailed({
-        runId: payload.runId,
-        mode: payload.currentMode ?? "unknown",
-        reason,
-      });
-    } else {
-      outcome = "noop_stale_or_recovered";
+    outcome = await failSyncContinuationIfCurrent({ payload, reason });
+    if (outcome !== "marked_failed" && outcome !== "marked_ambiguous") {
+      const run = await getSyncRun(payload.runId);
       logSyncEvent("qstash_failure_callback_noop", {
-        reason: run ? "run_not_at_failed_cursor" : "run_missing",
+        reason: outcome,
         cid: record.correlationId,
         sourceMessageId: callbackBody.sourceMessageId,
         kind: payload.kind,
@@ -245,39 +207,15 @@ export async function POST(request: Request) {
       });
     }
   } else {
-    const runId = await getRunIdForOperation(payload.opId);
-    if (runId) {
-      const run = await getSyncRun(runId);
-      if (shouldFailBulkFinishForExhaustedContinuation(run, payload)) {
-        await markSyncRunFailed({
-          runId,
-          mode: null,
-          reason,
-        });
-      } else {
-        outcome = "noop_stale_or_recovered";
-        logSyncEvent("qstash_failure_callback_noop", {
-          reason: run ? "bulk_op_not_active_for_run" : "run_missing",
-          cid: record.correlationId,
-          sourceMessageId: callbackBody.sourceMessageId,
-          kind: payload.kind,
-          payload,
-          ...(run ? summarizeSyncRun(run) : {}),
-        });
-      }
-    } else {
-      outcome = "noop_unknown_operation";
-      logSyncEvent(
-        "qstash_failure_callback_bulk_run_missing",
-        {
-          opId: payload.opId,
-          status: payload.status,
-          errorCode: payload.errorCode,
-          reason,
-          durationMs: Date.now() - startedAt,
-        },
-        "error",
-      );
+    outcome = await failBulkFinishContinuationIfCurrent({ payload, reason });
+    if (outcome !== "marked_failed") {
+      logSyncEvent("qstash_failure_callback_noop", {
+        reason: outcome,
+        cid: record.correlationId,
+        sourceMessageId: callbackBody.sourceMessageId,
+        kind: payload.kind,
+        payload,
+      });
     }
   }
 

@@ -10,12 +10,14 @@ function product(
   id: string,
   status: ShopifyProductInfo["status"],
   barcodes: string[],
+  excludeFrom1cStatusSync = false,
 ): ShopifyProductInfo {
   return {
     id: `gid://shopify/Product/${id}`,
     handle: `product-${id}`,
     status,
     weightKg: null,
+    excludeFrom1cStatusSync,
     variants: barcodes.map((barcode, index) => ({
       id: `gid://shopify/ProductVariant/${id}-${index}`,
       barcode,
@@ -60,4 +62,22 @@ test("stock status diff uses >0.1 threshold for manual and daily shared stock sy
   ]);
   assert.equal(diff.currentlyActive, 3);
   assert.equal(diff.proposedDraftFlips, 3);
+});
+
+test("stock status diff excludes protected products from updates and safety math", () => {
+  const entries = [
+    product("protected-active", "ACTIVE", ["missing"], true),
+    product("protected-draft", "DRAFT", ["available"], true),
+    product("eligible-active", "ACTIVE", ["available"]),
+    product("eligible-draft", "DRAFT", ["missing"]),
+  ];
+  const products = new Map(entries.map((entry) => [entry.id, entry]));
+
+  const diff = buildStockStatusDiff(products, { available: 1 });
+
+  assert.deepEqual(diff.updates, []);
+  assert.equal(diff.currentlyActive, 1);
+  assert.equal(diff.proposedDraftFlips, 0);
+  assert.equal(diff.protectedProductsSkipped, 2);
+  assert.deepEqual(diff.flippedToDraftSamples, []);
 });

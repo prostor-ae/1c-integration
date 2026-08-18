@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "next lint",
     "test": "tsx --test tests/*.test.ts",
-    "diff:shopify-1c": "tsx scripts/diff-shopify-1c.ts"
+    "diff:shopify-1c": "tsx scripts/diff-shopify-1c.ts",
+    "audit:variant-pagination": "tsx scripts/audit-shopify-variant-pagination.ts",
+    "export:1c-status-sync-exclusions": "tsx scripts/export-1c-status-sync-exclusions.ts --target=test"
   },
   "dependencies": {
     "@upstash/qstash": "^2.8.3",

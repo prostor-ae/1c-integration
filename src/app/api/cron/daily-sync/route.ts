@@ -44,6 +44,12 @@ export async function GET(request: Request) {
         source: "cron",
       });
     }
+    if (accepted.status === "quarantined") {
+      return NextResponse.json(
+        { ok: false, error: "ambiguous_bulk_quarantine", ...accepted },
+        { status: 503 },
+      );
+    }
     const durationMs = Date.now() - startedAt;
     logSyncEvent("cron_sync_accepted", { durationMs, accepted });
     return NextResponse.json({ ok: true, ...accepted }, { status: 202 });

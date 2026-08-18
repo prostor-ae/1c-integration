@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { isAuthorizedCronRequest } from "@/app/lib/cron-auth";
-import { reconcileSyncRuns } from "@/app/lib/sync";
+import { createSyncInvocationBudget, reconcileSyncRuns } from "@/app/lib/sync";
 import { reconcileSyncErrorResponse } from "@/app/lib/reconcile-sync-error-response";
 import { logSyncEvent } from "@/app/lib/sync-logging";
 
@@ -9,6 +9,7 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 export async function GET(request: Request) {
+  const startedAt = Date.now();
   if (!isAuthorizedCronRequest(request)) {
     logSyncEvent(
       "sync_reconcile_unauthorized",
@@ -23,9 +24,10 @@ export async function GET(request: Request) {
     return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
   }
 
-  const startedAt = Date.now();
   try {
-    const result = await reconcileSyncRuns();
+    const result = await reconcileSyncRuns(
+      createSyncInvocationBudget({ startedAt }),
+    );
     logSyncEvent("sync_reconcile_response", {
       durationMs: Date.now() - startedAt,
       ...result,

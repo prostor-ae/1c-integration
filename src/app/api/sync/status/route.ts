@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import {
+  getSyncAdmissionBlocker,
   getLatestSyncRun,
   getSyncRun,
   isMissingRedisConfig,
@@ -35,12 +36,52 @@ function toSyncRunStatusResponse(run: SyncRun) {
     proposedByMode: run.proposedByMode,
     appliedByMode: run.appliedByMode,
     skippedByMode: run.skippedByMode,
+    checkpointSequenceByMode: run.checkpointSequenceByMode,
+    protectedSkippedByMode: run.protectedSkippedByMode,
     failureReason: sanitizeOperationalText(run.failureReason),
     attempts: run.attempts,
     createdAt: run.createdAt,
     updatedAt: run.updatedAt,
     completedAt: run.completedAt,
     missedRecoveryCount: run.missedRecoveryCount,
+  };
+}
+
+/**
+ * Read-only view of what is currently blocking sync admission. Carries the
+ * quarantine token because it is the input POST /api/sync/quarantine/clear
+ * requires, and this route sits behind the same INTERNAL_API_KEY. A fence with
+ * no quarantine is reported as-is; it is adopted into a clearable quarantine by
+ * the next sync attempt or reconcile pass.
+ */
+async function readAdmissionBlocker() {
+  const blocker = await getSyncAdmissionBlocker();
+  if (!blocker) return null;
+  const { storeId, quarantine, launchFence } = blocker;
+  return {
+    storeId,
+    quarantine: quarantine
+      ? {
+          runId: quarantine.runId,
+          mode: quarantine.mode,
+          status: quarantine.status,
+          quarantineToken: quarantine.quarantineToken,
+          knownOperationId: quarantine.knownOperationId,
+          reason: sanitizeOperationalText(quarantine.reason),
+          createdAt: quarantine.createdAt,
+          launchRequestedAt: quarantine.launchRequestedAt,
+          noActiveCheckCount: quarantine.noActiveCheckTimestamps.length,
+        }
+      : null,
+    launchFence: launchFence
+      ? {
+          runId: launchFence.runId,
+          mode: launchFence.mode,
+          knownOperationId: launchFence.knownOperationId,
+          createdAt: launchFence.createdAt,
+          adopted: Boolean(quarantine),
+        }
+      : null,
   };
 }
 
@@ -61,6 +102,7 @@ export async function GET(request: Request) {
   const runId = new URL(request.url).searchParams.get("runId")?.trim();
 
   try {
+    const admissionBlocker = await readAdmissionBlocker();
     if (runId) {
       const run = await getSyncRun(runId);
       if (!run) {
@@ -86,6 +128,7 @@ export async function GET(request: Request) {
         ok: true,
         running: isRunningSyncRun(run),
         run: toSyncRunStatusResponse(run),
+        admissionBlocker,
       });
     }
 
@@ -96,7 +139,12 @@ export async function GET(request: Request) {
         lookup: "latest",
         durationMs: Date.now() - startedAt,
       });
-      return NextResponse.json({ ok: true, running: false, run: null });
+      return NextResponse.json({
+        ok: true,
+        running: false,
+        run: null,
+        admissionBlocker,
+      });
     }
 
     logSyncEvent("sync_status_returned", {
@@ -111,6 +159,7 @@ export async function GET(request: Request) {
       ok: true,
       running: isRunningSyncRun(run),
       run: toSyncRunStatusResponse(run),
+      admissionBlocker,
     });
   } catch (error: any) {
     const message = error?.message ?? String(error);

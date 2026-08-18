@@ -68,6 +68,12 @@ export async function POST(request: Request) {
         source: "manual",
       });
     }
+    if (accepted.status === "quarantined") {
+      return NextResponse.json(
+        { ok: false, error: "ambiguous_bulk_quarantine", ...accepted },
+        { status: 503 },
+      );
+    }
     const durationMs = Date.now() - startedAt;
     logSyncEvent("manual_sync_accepted", { durationMs, accepted });
     return NextResponse.json({ ok: true, ...accepted }, { status: 202 });

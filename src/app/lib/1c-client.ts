@@ -38,6 +38,7 @@ function oneCFetchError(
 async function fetch1cData(
   url: string,
   source: OneCSource,
+  signal?: AbortSignal,
 ): Promise<Record<string, number>> {
   const username = process.env.ONE_C_USERNAME;
   const password = process.env.ONE_C_PASSWORD;
@@ -49,7 +50,7 @@ async function fetch1cData(
 
   let response: Response;
   try {
-    response = await fetch(url, { headers });
+    response = await fetch(url, { headers, signal });
   } catch (error) {
     throw oneCFetchError(source, formatErrorMessage(error), error);
   }
@@ -75,23 +76,23 @@ async function fetch1cData(
   return data.Items || {};
 }
 
-export async function fetch1cPrices(): Promise<Record<string, number>> {
+export async function fetch1cPrices(signal?: AbortSignal): Promise<Record<string, number>> {
   console.log("Fetching prices from 1c...");
-  const items = await fetch1cData(ONE_C_PRICES_URL, "Prices");
+  const items = await fetch1cData(ONE_C_PRICES_URL, "Prices", signal);
   console.log(`Fetched ${Object.keys(items).length} prices.`);
   return items;
 }
 
-export async function fetch1cDiscounts(): Promise<Record<string, number>> {
+export async function fetch1cDiscounts(signal?: AbortSignal): Promise<Record<string, number>> {
   console.log("Fetching discounts from 1c...");
-  const items = await fetch1cData(ONE_C_DISCOUNTS_URL, "Discounts");
+  const items = await fetch1cData(ONE_C_DISCOUNTS_URL, "Discounts", signal);
   console.log(`Fetched ${Object.keys(items).length} discounts.`);
   return items;
 }
 
-export async function fetch1cStock(): Promise<Record<string, number>> {
+export async function fetch1cStock(signal?: AbortSignal): Promise<Record<string, number>> {
   console.log("Fetching stock from 1c...");
-  const items = await fetch1cData(ONE_C_STOCK_URL, "Stock");
+  const items = await fetch1cData(ONE_C_STOCK_URL, "Stock", signal);
   console.log(`Fetched ${Object.keys(items).length} stock balances.`);
   return items;
 }

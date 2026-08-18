@@ -61,6 +61,41 @@ export function getShopifyCredentials(isTest = false): {
   };
 }
 
+export function getShopifyCredentialsForStoreId(storeId: string): {
+  domain: string;
+  token: string;
+  isTest: boolean;
+} {
+  const normalizedStoreId = normalizeShopifyDomain(storeId);
+  const candidates = [
+    {
+      isTest: true,
+      domain: process.env.SHOPIFY_STORE_DOMAIN_TEST,
+      token: process.env.SHOPIFY_ADMIN_TOKEN_TEST,
+    },
+    {
+      isTest: false,
+      domain: process.env.SHOPIFY_STORE_DOMAIN,
+      token: process.env.SHOPIFY_ADMIN_TOKEN,
+    },
+  ];
+  const matched = candidates.find(
+    (candidate) =>
+      candidate.domain &&
+      normalizeShopifyDomain(candidate.domain) === normalizedStoreId,
+  );
+  if (!matched?.domain || !matched.token) {
+    throw new Error(
+      `Missing Shopify credentials for sync store alias ${normalizedStoreId}.`,
+    );
+  }
+  return {
+    domain: normalizeShopifyDomain(matched.domain),
+    token: matched.token,
+    isTest: matched.isTest,
+  };
+}
+
 export function getShopifyLogContext(isTest = false) {
   const env = selectShopifyEnv(isTest);
   let domain: string | undefined;

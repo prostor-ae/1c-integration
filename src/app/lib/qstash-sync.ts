@@ -22,6 +22,7 @@ export type SyncContinuationPayload =
       currentIndex: number;
       currentMode: SyncMode | null;
       runVersion?: number;
+      checkpointSequence?: number;
     }
   | {
       kind: "bulk-finish";
@@ -173,7 +174,7 @@ export function buildSyncContinuationDeduplicationId(
       payload.runId,
       payload.currentIndex,
       payload.currentMode ?? null,
-      payload.source,
+      payload.checkpointSequence ?? 0,
     ]);
   }
 
@@ -345,7 +346,11 @@ export function isSyncContinuationPayload(
         payload.currentMode === "prices" ||
         payload.currentMode === "stock") &&
       (payload.runVersion === undefined ||
-        typeof payload.runVersion === "number")
+        typeof payload.runVersion === "number") &&
+      (payload.checkpointSequence === undefined ||
+        (typeof payload.checkpointSequence === "number" &&
+          Number.isInteger(payload.checkpointSequence) &&
+          payload.checkpointSequence >= 0))
     );
   }
 
@@ -359,6 +364,26 @@ export function isSyncContinuationPayload(
   }
 
   return false;
+}
+
+export async function enqueuePersistedSyncContinuation(identity: {
+  payload: Extract<SyncContinuationPayload, { kind: "continue-run" }>;
+  deduplicationId: string;
+  correlationId: string;
+}): Promise<EnqueueSyncContinuationResult> {
+  const expectedDeduplicationId = buildSyncContinuationDeduplicationId(
+    identity.payload,
+  );
+  const expectedCorrelationId = buildSyncContinuationCorrelationId(
+    expectedDeduplicationId,
+  );
+  if (
+    identity.deduplicationId !== expectedDeduplicationId ||
+    identity.correlationId !== expectedCorrelationId
+  ) {
+    throw new Error("persisted sync continuation identity mismatch");
+  }
+  return await enqueueSyncContinuation(identity.payload);
 }
 
 export function __setSyncContinuationPublisherForTests(

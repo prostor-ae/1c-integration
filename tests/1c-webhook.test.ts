@@ -7,10 +7,20 @@ import {
 } from "../src/app/lib/1c-webhook";
 import type { MissingBarcodeAlertArgs } from "../src/app/lib/alerts";
 import type { ShopifyProductInfo } from "../src/app/lib/shopify-client";
+import {
+  ONE_C_STATUS_MUTATION_DEADLINE_MS,
+  setOneCWebhookRouteDepsForTests,
+} from "../src/app/lib/1c-webhook-route-deps";
+import {
+  __resetMemorySyncStateForTests,
+  saveBulkQuarantine,
+} from "../src/app/lib/sync-state";
 
 beforeEach(() => {
   delete process.env.ONE_C_WEBHOOK_KEY;
   Object.assign(process.env, { NODE_ENV: "test" });
+  __resetMemorySyncStateForTests();
+  setOneCWebhookRouteDepsForTests(null);
 });
 
 function product(
@@ -18,12 +28,14 @@ function product(
   status: ShopifyProductInfo["status"],
   barcode: string,
   sku?: string,
+  excludeFrom1cStatusSync = false,
 ): ShopifyProductInfo {
   return {
     id,
     handle: id.toLowerCase(),
     status,
     weightKg: 1,
+    excludeFrom1cStatusSync,
     variants: [
       {
         id: `${id}-variant`,
@@ -35,6 +47,60 @@ function product(
     ],
   };
 }
+
+test("protected webhook matches remain known without status updates", async () => {
+  const protectedProduct = product(
+    "gid://shopify/Product/protected",
+    "ACTIVE",
+    "KNOWN-BARCODE",
+    "KNOWN-SKU",
+    true,
+  );
+  const updates: string[] = [];
+  const result = await processOneCWebhookItems(
+    { "KNOWN-BARCODE": "No", "KNOWN-SKU": "No", UNKNOWN: "Yes" },
+    {
+      fetchProductsByIdentifiers: async () =>
+        new Map([[protectedProduct.id, protectedProduct]]),
+      updateProductStatus: async (productId, status) => {
+        updates.push(productId);
+        return { id: productId, status };
+      },
+    },
+  );
+
+  assert.deepEqual(updates, []);
+  assert.deepEqual(result.unknownBarcodes, ["UNKNOWN"]);
+  assert.equal(result.matched, 2);
+  assert.equal(result.protectedProductsSkipped, 1);
+  assert.equal(result.proposed, 0);
+  assert.equal(result.applied, 0);
+});
+
+test("duplicate identifier remains known and only eligible product updates", async () => {
+  const protectedProduct = product("protected", "ACTIVE", "DUP", undefined, true);
+  const eligibleProduct = product("eligible", "ACTIVE", "DUP");
+  const updates: string[] = [];
+  const result = await processOneCWebhookItems(
+    { DUP: "No" },
+    {
+      fetchProductsByIdentifiers: async () =>
+        new Map([
+          [protectedProduct.id, protectedProduct],
+          [eligibleProduct.id, eligibleProduct],
+        ]),
+      updateProductStatus: async (productId, status) => {
+        updates.push(productId);
+        return { id: productId, status };
+      },
+    },
+  );
+
+  assert.deepEqual(updates, ["eligible"]);
+  assert.equal(result.matched, 1);
+  assert.equal(result.unknown, 0);
+  assert.equal(result.protectedProductsSkipped, 1);
+});
 
 function webhookRequest(headers: HeadersInit, body: string) {
   return new Request("https://example.test/api/webhooks/1c", {
@@ -96,14 +162,122 @@ test("1C webhook rejects invalid JSON before Shopify processing", async () => {
         const parsed = JSON.parse(line);
         return (
           parsed.event === "1c_webhook_request_body" &&
-          parsed.body === "not-json" &&
-          parsed.bodyLength === 8
+          parsed.bodyLength === 8 &&
+          parsed.body === undefined
         );
       }),
     );
   } finally {
     console.log = originalLog;
   }
+});
+
+test("1C webhook returns retryable 503 while an ambiguous launch is quarantined", async () => {
+  process.env.ONE_C_WEBHOOK_KEY = "secret";
+  await saveBulkQuarantine({
+    schemaVersion: 1,
+    storeId: "default-shop",
+    runId: "run-ambiguous",
+    mode: "stock",
+    quarantineToken: "token-1234567890",
+    manifestHash: "a".repeat(64),
+    clientIdentifier: "sync-client",
+    knownOperationId: null,
+    status: "ambiguous_launch",
+    reason: "response lost",
+    launchRequestedAt: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+    noActiveCheckTimestamps: [],
+  });
+  const response = await oneCWebhookPost(
+    webhookRequest({ "x-api-key": "secret" }, JSON.stringify({ Items: { B1: "No" } })),
+  );
+  const body = await response.json();
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("retry-after"), "60");
+  assert.equal(body.error, "ambiguous_bulk_quarantine");
+});
+
+test("1C webhook holds the sync lock and a fence injected after reads causes zero writes", async () => {
+  process.env.ONE_C_WEBHOOK_KEY = "secret";
+  let released = false;
+  let blockerReads = 0;
+  let writes = 0;
+  setOneCWebhookRouteDepsForTests({
+    acquireLock: async () => "race-token",
+    releaseLock: async (token) => {
+      assert.equal(token, "race-token");
+      released = true;
+    },
+    getAdmissionBlocker: async () => {
+      blockerReads += 1;
+      const launchFence = blockerReads === 1
+        ? null
+        : {
+            schemaVersion: 1 as const,
+            storeId: "default-shop",
+            runId: "racing-run",
+            mode: "stock" as const,
+            manifestHash: "a".repeat(64),
+            clientIdentifier: "sync-race",
+            knownOperationId: null,
+            createdAt: new Date().toISOString(),
+          };
+      return launchFence
+        ? { storeId: launchFence.storeId, quarantine: null, launchFence }
+        : null;
+    },
+    processItems: async (_items, overrides) => {
+      // Simulate the Shopify read/diff phase before the route-provided mutation boundary.
+      await overrides?.beforeMutations?.();
+      writes += 1;
+      throw new Error("unreachable");
+    },
+  });
+  const response = await oneCWebhookPost(
+    webhookRequest({ "x-api-key": "secret" }, JSON.stringify({ Items: { B1: "No" } })),
+  );
+  assert.equal(response.status, 503);
+  assert.equal(writes, 0);
+  assert.equal(released, true);
+});
+
+test("1C webhook returns retryable 503 when the shared sync lock is busy", async () => {
+  process.env.ONE_C_WEBHOOK_KEY = "secret";
+  setOneCWebhookRouteDepsForTests({ acquireLock: async () => null });
+  const response = await oneCWebhookPost(
+    webhookRequest({ "x-api-key": "secret" }, JSON.stringify({ Items: { B1: "Yes" } })),
+  );
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error, "sync_lock_busy");
+});
+
+test("1C webhook aborts mutation work inside the lock lease margin and releases its token", async () => {
+  process.env.ONE_C_WEBHOOK_KEY = "secret";
+  assert.ok(ONE_C_STATUS_MUTATION_DEADLINE_MS <= 240_000);
+  assert.ok(ONE_C_STATUS_MUTATION_DEADLINE_MS < 300_000);
+  const controller = new AbortController();
+  controller.abort(new DOMException("deadline", "TimeoutError"));
+  let mutations = 0;
+  let releasedToken: string | null = null;
+  setOneCWebhookRouteDepsForTests({
+    acquireLock: async () => "deadline-owner",
+    releaseLock: async (token) => { releasedToken = token; },
+    getAdmissionBlocker: async () => null,
+    createMutationSignal: () => controller.signal,
+    processItems: async (_items, overrides) => {
+      overrides?.signal?.throwIfAborted();
+      mutations += 1;
+      throw new Error("unreachable");
+    },
+  });
+  const response = await oneCWebhookPost(
+    webhookRequest({ "x-api-key": "secret" }, JSON.stringify({ Items: { B1: "Yes" } })),
+  );
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error, "status_mutation_deadline_exceeded");
+  assert.equal(mutations, 0);
+  assert.equal(releasedToken, "deadline-owner");
 });
 
 test("parseOneCWebhookItems requires a non-empty Items object with exact Yes/No values", () => {
@@ -284,4 +458,33 @@ test("processOneCWebhookItems also matches payload keys against SKU", async () =
   assert.equal(result.proposed, 1);
   assert.equal(result.applied, 1);
   assert.equal(missingBarcodeAlertCalled, false);
+});
+
+test("realtime abort stops later status mutations and propagates one signal to reads and writes", async () => {
+  const controller = new AbortController();
+  const products = new Map<string, ShopifyProductInfo>([
+    ["p1", product("p1", "DRAFT", "B1")],
+    ["p2", product("p2", "DRAFT", "B2")],
+  ]);
+  const writes: string[] = [];
+  await assert.rejects(
+    processOneCWebhookItems(
+      { B1: "Yes", B2: "Yes" },
+      {
+        signal: controller.signal,
+        fetchProductsByIdentifiers: async (_identifiers, signal) => {
+          assert.equal(signal, controller.signal);
+          return products;
+        },
+        updateProductStatus: async (productId, status, signal) => {
+          assert.equal(signal, controller.signal);
+          writes.push(productId);
+          controller.abort(new DOMException("deadline", "TimeoutError"));
+          return { id: productId, status };
+        },
+      },
+    ),
+    (error: any) => error?.name === "TimeoutError",
+  );
+  assert.deepEqual(writes, ["p1"]);
 });
