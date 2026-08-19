@@ -101,7 +101,7 @@ export async function sendMissingBarcodeAlert({
     .filter((line): line is string => line !== null)
     .join("\n");
 
-  // await sendAlert({ subject, body });
+  await sendAlert({ subject, body });
 }
 
 export async function sendSafetyFloorAlert({

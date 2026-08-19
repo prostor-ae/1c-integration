@@ -5,9 +5,13 @@ import {
   ALERT_EMAIL_RECIPIENT,
   ALERT_EMAIL_RECIPIENTS,
   sendAlert,
+  sendMissingBarcodeAlert,
 } from "../src/app/lib/alerts";
 
+const originalFetch = globalThis.fetch;
+
 afterEach(() => {
+  globalThis.fetch = originalFetch;
   delete process.env.RESEND_API_KEY;
 });
 
@@ -44,4 +48,43 @@ test("alert emails no longer require sender or recipient environment variables",
   assert.equal(logged.event, "alert_send_failed");
   assert.match(logged.error, /RESEND_API_KEY env var is not set/);
   assert.doesNotMatch(logged.error, /ALERT_FROM|ALERT_RECIPIENTS/);
+});
+
+test("unknown barcode alert sends one aggregated Resend email", async () => {
+  process.env.RESEND_API_KEY = "re_test";
+  let email: Record<string, unknown> | null = null;
+
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+    assert.equal(url, "https://api.resend.com/emails");
+    assert.equal(typeof init?.body, "string");
+    email = JSON.parse(String(init?.body));
+    return new Response(JSON.stringify({ id: "email_unknown_barcodes" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  await sendMissingBarcodeAlert({
+    received: 3,
+    matched: 1,
+    unknown: 2,
+    unchanged: 0,
+    proposed: 1,
+    applied: 1,
+    unknownBarcodes: ["UNKNOWN-1", "UNKNOWN-2"],
+  });
+
+  assert.equal(
+    email?.subject,
+    "[1c-integration] 1C webhook unknown Shopify barcodes (2)",
+  );
+  assert.deepEqual(email?.to, ALERT_EMAIL_RECIPIENTS);
+  assert.match(String(email?.text), /UNKNOWN-1/);
+  assert.match(String(email?.text), /UNKNOWN-2/);
 });

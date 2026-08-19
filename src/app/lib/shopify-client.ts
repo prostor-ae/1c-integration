@@ -707,6 +707,11 @@ export type ShopifyProductInfo = {
   }[];
 };
 
+export function isPositiveShopifyPrice(value: unknown): boolean {
+  const price = Number(value);
+  return Number.isFinite(price) && price > 0;
+}
+
 type ShopifyMetafieldValue = {
   type?: unknown;
   value?: unknown;

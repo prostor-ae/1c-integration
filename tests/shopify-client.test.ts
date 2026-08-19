@@ -8,6 +8,7 @@ import {
   COST_UPDATE_BULK_MUTATION,
   describeShopifyError,
   getShopifyLogContext,
+  isPositiveShopifyPrice,
   normalizeShopifyDomain,
   PRICE_UPDATE_BULK_MUTATION,
   fetchShopifyProductPage,
@@ -463,6 +464,15 @@ test("1C price helpers treat non-positive prices and invalid compare-at prices a
   assert.equal(isSyncableOneCDiscount(30, 30), false);
   assert.equal(isSyncableOneCDiscount(20, 30), false);
   assert.equal(isSyncableOneCDiscount("not-a-number", 30), false);
+});
+
+test("Shopify price helper accepts only finite positive prices", () => {
+  assert.equal(isPositiveShopifyPrice("0.01"), true);
+  assert.equal(isPositiveShopifyPrice("0.00"), false);
+  assert.equal(isPositiveShopifyPrice(0), false);
+  assert.equal(isPositiveShopifyPrice(-1), false);
+  assert.equal(isPositiveShopifyPrice("not-a-number"), false);
+  assert.equal(isPositiveShopifyPrice(undefined), false);
 });
 
 test("1C stock helper treats only amounts above 0.1 as active", () => {

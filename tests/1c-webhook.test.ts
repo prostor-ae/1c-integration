@@ -29,6 +29,7 @@ function product(
   barcode: string,
   sku?: string,
   excludeFrom1cStatusSync = false,
+  price = "1.00",
 ): ShopifyProductInfo {
   return {
     id,
@@ -41,7 +42,7 @@ function product(
         id: `${id}-variant`,
         barcode,
         sku,
-        price: "1.00",
+        price,
         compareAtPrice: null,
       },
     ],
@@ -100,6 +101,51 @@ test("duplicate identifier remains known and only eligible product updates", asy
   assert.equal(result.matched, 1);
   assert.equal(result.unknown, 0);
   assert.equal(result.protectedProductsSkipped, 1);
+});
+
+test("webhook does not activate a zero-priced draft but still allows deactivation", async () => {
+  const zeroPricedDraft = product(
+    "zero-priced-draft",
+    "DRAFT",
+    "ACTIVATE",
+    undefined,
+    false,
+    "0.00",
+  );
+  const zeroPricedActive = product(
+    "zero-priced-active",
+    "ACTIVE",
+    "DEACTIVATE",
+    undefined,
+    false,
+    "0.00",
+  );
+  const capturedUpdates: Array<{
+    productId: string;
+    status: "ACTIVE" | "DRAFT";
+  }> = [];
+
+  const result = await processOneCWebhookItems(
+    { ACTIVATE: "Yes", DEACTIVATE: "No" },
+    {
+      fetchProductsByIdentifiers: async () =>
+        new Map([
+          [zeroPricedDraft.id, zeroPricedDraft],
+          [zeroPricedActive.id, zeroPricedActive],
+        ]),
+      updateProductStatus: async (productId, status) => {
+        capturedUpdates.push({ productId, status });
+        return { id: productId, status };
+      },
+    },
+  );
+
+  assert.deepEqual(capturedUpdates, [
+    { productId: "zero-priced-active", status: "DRAFT" },
+  ]);
+  assert.equal(result.unchanged, 1);
+  assert.equal(result.proposed, 1);
+  assert.equal(result.applied, 1);
 });
 
 function webhookRequest(headers: HeadersInit, body: string) {

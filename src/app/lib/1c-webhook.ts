@@ -1,5 +1,6 @@
 import {
   fetchShopifyProductsAndVariantsByIdentifiers,
+  isPositiveShopifyPrice,
   updateProductStatus,
   type ShopifyProductInfo,
 } from "@/app/lib/shopify-client";
@@ -80,6 +81,7 @@ export function buildStatusUpdatesFromWebhookItems(
   const statusByProduct = new Map<string, ShopifyProductInfo["status"]>();
   const knownBarcodes = new Set<string>();
   const protectedProductIds = new Set<string>();
+  const productsWithPositivePricedAvailability = new Set<string>();
 
   products.forEach((product) => {
     statusByProduct.set(product.id, product.status);
@@ -99,6 +101,12 @@ export function buildStatusUpdatesFromWebhookItems(
           continue;
         }
         const desiredStatus = items[identifier] === "Yes" ? "ACTIVE" : "DRAFT";
+        if (
+          desiredStatus === "ACTIVE" &&
+          isPositiveShopifyPrice(variant.price)
+        ) {
+          productsWithPositivePricedAvailability.add(product.id);
+        }
         const previous = desiredByProduct.get(product.id);
 
         // Product-level status is ACTIVE if any payload-mentioned variant is Yes.
@@ -112,7 +120,13 @@ export function buildStatusUpdatesFromWebhookItems(
   let unchanged = 0;
 
   desiredByProduct.forEach((desiredStatus, productId) => {
-    if (statusByProduct.get(productId) === desiredStatus) {
+    const currentStatus = statusByProduct.get(productId);
+    if (
+      currentStatus === desiredStatus ||
+      (currentStatus === "DRAFT" &&
+        desiredStatus === "ACTIVE" &&
+        !productsWithPositivePricedAvailability.has(productId))
+    ) {
       unchanged += 1;
       return;
     }

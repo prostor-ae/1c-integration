@@ -219,6 +219,11 @@ products are excluded from both sides of the 20% stock safety ratio and are
 reported in `protectedSkippedByMode.stock` / `protectedProductsSkipped`. Their
 barcode/SKU is still a known webhook match, so it is not reported as missing.
 
+Both status-sync paths also leave a `DRAFT` product unchanged unless at least
+one variant reported as available has a finite Shopify price greater than zero.
+This activation guard does not prevent an `ACTIVE` product from moving to
+`DRAFT` when it is no longer available.
+
 If a previous bulk op is still RUNNING/CREATED when a mode starts, that mode is skipped (Shopify allows only one bulk op per app at a time) and a conflict alert is emailed.
 
 ## Deprecation: `/api/update-costs`

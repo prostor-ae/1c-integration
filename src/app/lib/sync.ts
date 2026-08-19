@@ -15,6 +15,7 @@ import {
   createAndUploadBulkMutationManifest,
   launchPreparedBulkMutation,
   isAbortError,
+  isPositiveShopifyPrice,
   ShopifyProductVariantsTruncatedError,
   type CostUpdateBulkMutationInput,
   type PriceUpdateBulkMutationInput,
@@ -258,15 +259,26 @@ export function buildStockStatusDiff(
     if (product.status === "ACTIVE") currentlyActive += 1;
 
     let productInStock = false;
+    let positivePricedVariantInStock = false;
     for (const variant of product.variants) {
       if (!variant.barcode) continue;
       if (isActiveOneCStockAmount(stock1c[variant.barcode])) {
         productInStock = true;
-        break;
+        if (isPositiveShopifyPrice(variant.price)) {
+          positivePricedVariantInStock = true;
+          break;
+        }
       }
     }
 
     const newStatus: "ACTIVE" | "DRAFT" = productInStock ? "ACTIVE" : "DRAFT";
+    if (
+      product.status === "DRAFT" &&
+      newStatus === "ACTIVE" &&
+      !positivePricedVariantInStock
+    ) {
+      return;
+    }
     if (newStatus !== product.status) {
       updates.push({ productId: product.id, status: newStatus });
       if (product.status === "ACTIVE" && newStatus === "DRAFT") {

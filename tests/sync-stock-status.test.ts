@@ -11,6 +11,7 @@ function product(
   status: ShopifyProductInfo["status"],
   barcodes: string[],
   excludeFrom1cStatusSync = false,
+  prices: string[] = [],
 ): ShopifyProductInfo {
   return {
     id: `gid://shopify/Product/${id}`,
@@ -21,7 +22,7 @@ function product(
     variants: barcodes.map((barcode, index) => ({
       id: `gid://shopify/ProductVariant/${id}-${index}`,
       barcode,
-      price: "1.00",
+      price: prices[index] ?? "1.00",
       compareAtPrice: null,
     })),
   };
@@ -80,4 +81,48 @@ test("stock status diff excludes protected products from updates and safety math
   assert.equal(diff.proposedDraftFlips, 0);
   assert.equal(diff.protectedProductsSkipped, 2);
   assert.deepEqual(diff.flippedToDraftSamples, []);
+});
+
+test("stock status diff does not activate a draft without an available positive-priced variant", () => {
+  const entries = [
+    product("zero-price", "DRAFT", ["zero-price"], false, ["0.00"]),
+    product(
+      "positive-price-out-of-stock",
+      "DRAFT",
+      ["zero-price-in-stock", "positive-price-out-of-stock"],
+      false,
+      ["0.00", "5.00"],
+    ),
+    product(
+      "positive-price-in-stock",
+      "DRAFT",
+      ["zero-price-in-stock-2", "positive-price-in-stock"],
+      false,
+      ["0.00", "5.00"],
+    ),
+    product("zero-price-deactivation", "ACTIVE", ["out-of-stock"], false, [
+      "0.00",
+    ]),
+  ];
+  const products = new Map(entries.map((entry) => [entry.id, entry]));
+
+  const diff = buildStockStatusDiff(products, {
+    "zero-price": 1,
+    "zero-price-in-stock": 1,
+    "positive-price-out-of-stock": 0,
+    "zero-price-in-stock-2": 1,
+    "positive-price-in-stock": 1,
+    "out-of-stock": 0,
+  });
+
+  assert.deepEqual(diff.updates, [
+    {
+      productId: "gid://shopify/Product/positive-price-in-stock",
+      status: "ACTIVE",
+    },
+    {
+      productId: "gid://shopify/Product/zero-price-deactivation",
+      status: "DRAFT",
+    },
+  ]);
 });
