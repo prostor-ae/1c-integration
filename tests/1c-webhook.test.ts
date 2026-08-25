@@ -218,6 +218,39 @@ test("1C webhook rejects invalid JSON before Shopify processing", async () => {
   }
 });
 
+test("1C webhook logs the authenticated request body with its barcodes", async () => {
+  process.env.ONE_C_WEBHOOK_KEY = "secret";
+  setOneCWebhookRouteDepsForTests({ acquireLock: async () => null });
+  const rawBody = JSON.stringify({
+    Items: { "4607065580261": "Yes", "4760062100297": "No" },
+  });
+  const logs: string[] = [];
+  const originalLog = console.log;
+  console.log = (message?: any) => {
+    logs.push(String(message));
+  };
+
+  try {
+    const response = await oneCWebhookPost(
+      webhookRequest({ "x-api-key": "secret" }, rawBody),
+    );
+
+    assert.equal(response.status, 503);
+    assert.ok(
+      logs.some((line) => {
+        const parsed = JSON.parse(line);
+        return (
+          parsed.event === "1c_webhook_request_body" &&
+          parsed.bodyLength === rawBody.length &&
+          parsed.body === rawBody
+        );
+      }),
+    );
+  } finally {
+    console.log = originalLog;
+  }
+});
+
 test("1C webhook returns retryable 503 while an ambiguous launch is quarantined", async () => {
   process.env.ONE_C_WEBHOOK_KEY = "secret";
   await saveBulkQuarantine({
