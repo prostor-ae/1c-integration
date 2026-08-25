@@ -45,6 +45,7 @@ export async function POST(req: Request) {
       JSON.stringify({
         event: "1c_webhook_request_body",
         bodyLength: rawBody.length,
+        body: rawBody,
       }),
     );
 

@@ -209,7 +209,7 @@ test("1C webhook rejects invalid JSON before Shopify processing", async () => {
         return (
           parsed.event === "1c_webhook_request_body" &&
           parsed.bodyLength === 8 &&
-          parsed.body === undefined
+          parsed.body === "not-json"
         );
       }),
     );
