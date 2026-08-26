@@ -21,6 +21,7 @@ export const ALERT_EMAIL_RECIPIENT = "chepiga.lev@gmail.com";
 export const ALERT_EMAIL_RECIPIENTS = [
   ALERT_EMAIL_RECIPIENT,
   "sergei.vasilev@alqithara.ae",
+  "aigerim.alekova@alqithara.ae",
 ];
 const MISSING_BARCODE_ALERT_SAMPLE_LIMIT = 25;
 
