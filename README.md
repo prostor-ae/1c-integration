@@ -224,6 +224,13 @@ one variant reported as available has a finite Shopify price greater than zero.
 This activation guard does not prevent an `ACTIVE` product from moving to
 `DRAFT` when it is no longer available.
 
+For a real-time webhook `Yes`, the integration also reads the current numeric
+1C stock feed and requires the matching balance to be strictly greater than
+`0.1` before activating the product. Missing, invalid, or `<= 0.1` balances are
+treated as unavailable, matching daily/manual stock sync. A webhook containing
+only `No` values still deactivates products without fetching the stock feed; an
+empty stock feed fails a `Yes` webhook before any Shopify status mutation.
+
 If a previous bulk op is still RUNNING/CREATED when a mode starts, that mode is skipped (Shopify allows only one bulk op per app at a time) and a conflict alert is emailed.
 
 ## Deprecation: `/api/update-costs`

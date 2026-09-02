@@ -61,6 +61,7 @@ test("protected webhook matches remain known without status updates", async () =
   const result = await processOneCWebhookItems(
     { "KNOWN-BARCODE": "No", "KNOWN-SKU": "No", UNKNOWN: "Yes" },
     {
+      fetchStock: async () => ({ OTHER: 1 }),
       fetchProductsByIdentifiers: async () =>
         new Map([[protectedProduct.id, protectedProduct]]),
       updateProductStatus: async (productId, status) => {
@@ -85,6 +86,9 @@ test("duplicate identifier remains known and only eligible product updates", asy
   const result = await processOneCWebhookItems(
     { DUP: "No" },
     {
+      fetchStock: async () => {
+        throw new Error("stock should not be fetched for No-only webhooks");
+      },
       fetchProductsByIdentifiers: async () =>
         new Map([
           [protectedProduct.id, protectedProduct],
@@ -128,6 +132,7 @@ test("webhook does not activate a zero-priced draft but still allows deactivatio
   const result = await processOneCWebhookItems(
     { ACTIVATE: "Yes", DEACTIVATE: "No" },
     {
+      fetchStock: async () => ({ ACTIVATE: 1 }),
       fetchProductsByIdentifiers: async () =>
         new Map([
           [zeroPricedDraft.id, zeroPricedDraft],
@@ -146,6 +151,71 @@ test("webhook does not activate a zero-priced draft but still allows deactivatio
   assert.equal(result.unchanged, 1);
   assert.equal(result.proposed, 1);
   assert.equal(result.applied, 1);
+});
+
+test("webhook requires the numeric 1C stock balance to exceed 0.1 before activation", async () => {
+  const belowThreshold = product("below-threshold", "ACTIVE", "4810176104190");
+  const atThreshold = product("at-threshold", "DRAFT", "AT-THRESHOLD");
+  const aboveThreshold = product("above-threshold", "DRAFT", "ABOVE-THRESHOLD");
+  const capturedUpdates: Array<{
+    productId: string;
+    status: "ACTIVE" | "DRAFT";
+  }> = [];
+
+  const result = await processOneCWebhookItems(
+    {
+      "4810176104190": "Yes",
+      "AT-THRESHOLD": "Yes",
+      "ABOVE-THRESHOLD": "Yes",
+    },
+    {
+      fetchStock: async () => ({
+        "4810176104190": 0.043,
+        "AT-THRESHOLD": 0.1,
+        "ABOVE-THRESHOLD": 0.11,
+      }),
+      fetchProductsByIdentifiers: async () =>
+        new Map([
+          [belowThreshold.id, belowThreshold],
+          [atThreshold.id, atThreshold],
+          [aboveThreshold.id, aboveThreshold],
+        ]),
+      updateProductStatus: async (productId, status) => {
+        capturedUpdates.push({ productId, status });
+        return { id: productId, status };
+      },
+    },
+  );
+
+  assert.deepEqual(capturedUpdates, [
+    { productId: "below-threshold", status: "DRAFT" },
+    { productId: "above-threshold", status: "ACTIVE" },
+  ]);
+  assert.equal(result.unchanged, 1);
+  assert.equal(result.proposed, 2);
+  assert.equal(result.applied, 2);
+});
+
+test("webhook fails closed before mutations when the numeric 1C stock feed is empty", async () => {
+  let mutationCalled = false;
+
+  await assert.rejects(
+    processOneCWebhookItems(
+      { "481": "Yes" },
+      {
+        fetchStock: async () => ({}),
+        fetchProductsByIdentifiers: async () =>
+          new Map([["product", product("product", "DRAFT", "481")]]),
+        updateProductStatus: async () => {
+          mutationCalled = true;
+          return { id: "product", status: "ACTIVE" };
+        },
+      },
+    ),
+    /one_c_stock_must_be_non_empty_for_available_items/,
+  );
+
+  assert.equal(mutationCalled, false);
 });
 
 function webhookRequest(headers: HeadersInit, body: string) {
@@ -386,7 +456,7 @@ test("parseOneCWebhookItems requires a non-empty Items object with exact Yes/No 
   );
 });
 
-test("processOneCWebhookItems maps barcode Yes/No to direct product ACTIVE/DRAFT updates", async () => {
+test("processOneCWebhookItems combines webhook availability with numeric 1C stock", async () => {
   const products = new Map<string, ShopifyProductInfo>([
     [
       "gid://shopify/Product/1",
@@ -415,6 +485,7 @@ test("processOneCWebhookItems maps barcode Yes/No to direct product ACTIVE/DRAFT
   const result = await processOneCWebhookItems(
     { "481": "Yes", "482": "No", "483": "No", unknown: "Yes" },
     {
+      fetchStock: async () => ({ "481": 1 }),
       fetchProductsByIdentifiers: async (identifiers) => {
         requestedIdentifiers = identifiers;
         return products;
@@ -475,6 +546,7 @@ test("processOneCWebhookItems does not run a Shopify mutation when all matches a
     const result = await processOneCWebhookItems(
       { "481": "Yes", unknown: "No" },
       {
+        fetchStock: async () => ({ "481": 1 }),
         fetchProductsByIdentifiers: async () => products,
         updateProductStatus: async () => {
           mutationCalled = true;
@@ -517,6 +589,7 @@ test("processOneCWebhookItems also matches payload keys against SKU", async () =
   const result = await processOneCWebhookItems(
     { "SKU-481": "Yes" },
     {
+      fetchStock: async () => ({ "SKU-481": 1 }),
       fetchProductsByIdentifiers: async () => products,
       updateProductStatus: async (productId, status) => {
         capturedUpdates.push({ productId, status });
@@ -551,6 +624,10 @@ test("realtime abort stops later status mutations and propagates one signal to r
       { B1: "Yes", B2: "Yes" },
       {
         signal: controller.signal,
+        fetchStock: async (signal) => {
+          assert.equal(signal, controller.signal);
+          return { B1: 1, B2: 1 };
+        },
         fetchProductsByIdentifiers: async (_identifiers, signal) => {
           assert.equal(signal, controller.signal);
           return products;

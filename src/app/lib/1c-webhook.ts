@@ -4,6 +4,8 @@ import {
   updateProductStatus,
   type ShopifyProductInfo,
 } from "@/app/lib/shopify-client";
+import { fetch1cStock } from "@/app/lib/1c-client";
+import { isActiveOneCStockAmount } from "@/app/lib/one-c-values";
 import {
   sendMissingBarcodeAlert,
   type MissingBarcodeAlertArgs,
@@ -21,6 +23,7 @@ export class OneCStatusSyncFencedError extends Error {
 }
 
 export type ProcessDeps = {
+  fetchStock: (signal?: AbortSignal) => Promise<Record<string, number>>;
   fetchProductsByIdentifiers: (
     identifiers: string[],
     signal?: AbortSignal,
@@ -38,6 +41,7 @@ export type ProcessDeps = {
 };
 
 const DEFAULT_DEPS: ProcessDeps = {
+  fetchStock: fetch1cStock,
   fetchProductsByIdentifiers: fetchShopifyProductsAndVariantsByIdentifiers,
   updateProductStatus,
   sendMissingBarcodeAlert,
@@ -76,6 +80,7 @@ export function parseOneCWebhookItems(
 export function buildStatusUpdatesFromWebhookItems(
   products: Map<string, ShopifyProductInfo>,
   items: Record<string, OneCAvailability>,
+  stock1c: Record<string, number>,
 ) {
   const desiredByProduct = new Map<string, ShopifyStatus>();
   const statusByProduct = new Map<string, ShopifyProductInfo["status"]>();
@@ -100,7 +105,14 @@ export function buildStatusUpdatesFromWebhookItems(
           protectedProductIds.add(product.id);
           continue;
         }
-        const desiredStatus = items[identifier] === "Yes" ? "ACTIVE" : "DRAFT";
+        // "Yes" scopes the real-time update, while the numeric stock feed
+        // remains authoritative for the shared >0.1 availability threshold.
+        const stockIdentifier = variant.barcode || variant.sku || identifier;
+        const desiredStatus =
+          items[identifier] === "Yes" &&
+          isActiveOneCStockAmount(stock1c[stockIdentifier])
+            ? "ACTIVE"
+            : "DRAFT";
         if (
           desiredStatus === "ACTIVE" &&
           isPositiveShopifyPrice(variant.price)
@@ -157,11 +169,15 @@ export async function processOneCWebhookItems(
 ) {
   const deps: ProcessDeps = { ...DEFAULT_DEPS, ...overrides };
   deps.signal?.throwIfAborted();
-  const products = await deps.fetchProductsByIdentifiers(
-    Object.keys(items),
-    deps.signal,
-  );
-  const result = buildStatusUpdatesFromWebhookItems(products, items);
+  const hasAvailableItems = Object.values(items).includes("Yes");
+  const [products, stock1c] = await Promise.all([
+    deps.fetchProductsByIdentifiers(Object.keys(items), deps.signal),
+    hasAvailableItems ? deps.fetchStock(deps.signal) : Promise.resolve({}),
+  ]);
+  if (hasAvailableItems && Object.keys(stock1c).length === 0) {
+    throw new Error("one_c_stock_must_be_non_empty_for_available_items");
+  }
+  const result = buildStatusUpdatesFromWebhookItems(products, items, stock1c);
   const updatedProducts = [];
 
   // The route uses this boundary to re-read durable launch fencing after all
